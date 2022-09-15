@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/user"
 	"strconv"
+	"strings"
 
 	"github.com/david-caro/netsnoop/internal/netstat"
 
@@ -144,23 +145,28 @@ func main() {
 	}
 }
 
+func portToInt(port string) (int, error) {
+	maybePort := strings.Split(port, "(")[0]
+	return strconv.Atoi(maybePort)
+}
+
 func getUser(packet gopacket.Packet, localIsSrc bool) (string, error) {
 	var port int
 	var err error
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		layerData, _ := tcpLayer.(*layers.TCP)
 		if localIsSrc {
-			port, err = strconv.Atoi(layerData.SrcPort.String())
+			port, err = portToInt(layerData.SrcPort.String())
 		} else {
-			port, err = strconv.Atoi(layerData.DstPort.String())
+			port, err = portToInt(layerData.DstPort.String())
 		}
 
 	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
 		layerData, _ := tcpLayer.(*layers.UDP)
 		if localIsSrc {
-			port, err = strconv.Atoi(layerData.SrcPort.String())
+			port, err = portToInt(layerData.SrcPort.String())
 		} else {
-			port, err = strconv.Atoi(layerData.DstPort.String())
+			port, err = portToInt(layerData.DstPort.String())
 		}
 	}
 	if err != nil {
