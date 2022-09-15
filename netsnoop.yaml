@@ -2,6 +2,9 @@ interesting_services:
   google:
     ips:
       - 172.217.19.238
+  "meta.wikimedia.org":
+    ips:
+      - 208.80.154.224
   "login.toolforge.org":
     ips:
       - 185.15.56.66
