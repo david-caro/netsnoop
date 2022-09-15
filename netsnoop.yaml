@@ -1,0 +1,7 @@
+interesting_services:
+  google:
+    ips:
+      - 172.217.19.238
+  "login.toolforge.org":
+    ips:
+      - 185.15.56.66
