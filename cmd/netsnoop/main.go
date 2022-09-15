@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
-	"os"
 	"os/user"
 	"strconv"
 
@@ -30,7 +30,8 @@ type Config struct {
 
 func readConfig(configPath string) (Config, error) {
 	config := Config{}
-	rawConfig, err := os.ReadFile(configPath)
+	// this is deprecated but we have golang go1.11.6 in prod hosts, replace with os.ReadFile once we get on >1.16
+	rawConfig, err := ioutil.ReadFile(configPath)
 	if err != nil {
 		fmt.Print(err)
 		return config, err
