@@ -1,7 +1,4 @@
 interesting_services:
-  google:
-    ips:
-      - 172.217.19.238
   "meta.wikimedia.org":
     ips:
       - 208.80.154.224

@@ -122,8 +122,8 @@ func main() {
 				foundService, foundSrcIP = ipToService[layerData.SrcIP.String()]
 			}
 			if foundDstIP || foundSrcIP {
-				log.Info("Detected contact with service ", foundService)
-				log.Info("Triggering a full re-scan")
+				log.Debug("Detected contact with service ", foundService)
+				log.Debug("Triggering a full re-scan")
 				userToService, err := getUserAndInterestingServices(packet, true, &ipToService)
 				if err != nil {
 					log.Warn("    unable to get process for packet: ", err)
