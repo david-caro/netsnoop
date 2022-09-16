@@ -3,7 +3,6 @@ package netstat
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +13,10 @@ import (
 
 	log "github.com/sirupsen/logrus"
 )
+
+type Void struct{}
+
+var member Void
 
 type Protocol struct {
 	// RelPath is the proc file path relative to the process directory
@@ -39,65 +42,59 @@ var (
 	UDP6 = &Protocol{"net/udp6"}
 )
 
-func (p *Process) ConnectionFromLocalPort(localPort int) (Connection, error) {
+func (p *Process) getUserAndInterestingServices(ipToService *map[string]string) (map[int]map[string]Void, error) {
 	lines, err := p.readProcNetFile()
 	if err != nil {
-		return Connection{}, err
+		return nil, err
 	}
-
-	connection, err := p.findConnectionFromLocalPort(lines, localPort)
-	return connection, err
+	userToService, err := p.findUsersForInterestingIPs(lines, ipToService)
+	return userToService, err
 }
 
-func findConnectionFromLocalPort(lines [][]string, localPort int, protocol *Protocol, pid int) (Connection, error) {
+func findUsersForInterestingIPs(lines [][]string, ipToService *map[string]string, protocol *Protocol, pid int) (map[int]map[string]Void, error) {
+	userToService := make(map[int]map[string]Void)
 	for _, line := range lines {
-		localIPPortHex := strings.Split(line[1], ":")
-		gottenLocalPort := parsePort(localIPPortHex[1])
-		localPortHex := strconv.FormatInt(int64(localPort), 16)
-		log.Debug("     matching local port ", localPort, " (", localPortHex, ") with gotten port ", gottenLocalPort, " (", localIPPortHex[1], ")")
-		if localPort != gottenLocalPort {
+		remoteIPPort := strings.Split(line[2], ":")
+		remoteIP := parseIP(remoteIPPort[0])
+		log.Debug("     matching remote ip ", remoteIP.String())
+
+		interestingService, ok := (*ipToService)[remoteIP.String()]
+		if !ok {
+			log.Debug("    ", remoteIP.String(), " is not interesting for us")
 			continue
 		}
-		remoteIPPort := strings.Split(line[2], ":")
+		log.Debug("    found interesting ip ", remoteIP.String(), " part of service ", interestingService)
 
 		userID, err := strconv.Atoi(line[7])
 		if err != nil {
-			return Connection{}, err
+			return userToService, err
 		}
-
-		connection := &Connection{
-			Pid:        pid,
-			UserID:     userID,
-			IP:         parseIP(localIPPortHex[0]),
-			Port:       localPort,
-			RemoteIP:   parseIP(remoteIPPort[0]),
-			RemotePort: parsePort(remoteIPPort[1]),
-			Protocol:   protocol,
-		}
-
-		if connection.UserID != 0 {
-			return *connection, nil
-		}
+		log.Debug("    user: ", userID)
 
 		//fmt.Printf("Got connection %v\n", connection)
-		return *connection, nil
+		userServices, ok := userToService[userID]
+		if !ok {
+			userServices = make(map[string]Void)
+		}
+		userServices[interestingService] = member
+		userToService[userID] = userServices
 	}
 
-	return Connection{}, errors.New("unable to get process for port")
+	return userToService, nil
 }
 
-func (p *Process) findConnectionFromLocalPort(lines [][]string, localPort int) (Connection, error) {
-	return findConnectionFromLocalPort(lines, localPort, p.Protocol, p.Pid)
+func (p *Process) findUsersForInterestingIPs(lines [][]string, ipToService *map[string]string) (map[int]map[string]Void, error) {
+	return findUsersForInterestingIPs(lines, ipToService, p.Protocol, p.Pid)
 }
 
-func FindConnectionFromLocalPortPerProcess(localPort int, protocol *Protocol) (Connection, error) {
+func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol *Protocol) (map[int]map[string]Void, error) {
 	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol.RelPath)
 	log.Debug("Searching for proc dirs matching ", globStr)
 	procDirs, err := filepath.Glob(globStr)
 	if err != nil {
-		return Connection{}, err
+		return nil, err
 	}
-	log.Debug(fmt.Sprintf("Checking for any process using local port %d under %d proc dirs", localPort, len(procDirs)))
+	log.Debug(fmt.Sprintf("Checking for any process is connecting to any interesting IPs under %d proc dirs", len(procDirs)))
 	for _, netFile := range procDirs {
 		log.Debug("   got process dir", netFile)
 		dirChunks := strings.Split(netFile, "/")
@@ -107,21 +104,21 @@ func FindConnectionFromLocalPortPerProcess(localPort int, protocol *Protocol) (C
 		}
 		pid, err := strconv.Atoi(procDirName)
 		if err != nil {
-			return Connection{}, err
+			return nil, err
 		}
 
 		process := Process{
 			Pid:      pid,
 			Protocol: protocol,
 		}
-		connection, _ := process.ConnectionFromLocalPort(localPort)
-		if connection.Pid != 0 {
-			log.Debug("Got connection!", connection)
-			return connection, nil
+		userToService, _ := process.getUserAndInterestingServices(ipToService)
+		if len(userToService) != 0 {
+			log.Debug("Found process using interesting services!", userToService)
+			return userToService, nil
 		}
-		log.Debug("Got nothing xd!", connection)
+		log.Debug("Got nothing xd!")
 	}
-	return Connection{}, fmt.Errorf("unable to find process using local port %d", localPort)
+	return nil, fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
 }
 
 func readProcNetFile(procFilePath string) ([][]string, error) {
@@ -173,12 +170,6 @@ func lineParts(line string) []string {
 		}
 	}
 	return filtered
-}
-
-func parsePort(port string) int {
-	// port number is an unsigned 16-bit integer
-	dec, _ := strconv.ParseUint(port, 16, 16)
-	return int(dec)
 }
 
 func parseIP(ip string) net.IP {

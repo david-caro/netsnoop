@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"os/user"
 	"strconv"
-	"strings"
 
 	"github.com/david-caro/netsnoop/internal/netstat"
 
@@ -35,13 +34,13 @@ func readConfig(configPath string) (Config, error) {
 	// this is deprecated but we have golang go1.11.6 in prod hosts, replace with os.ReadFile once we get on >1.16
 	rawConfig, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		fmt.Print(err)
+		log.Error(err)
 		return config, err
 	}
 
 	err = yaml.Unmarshal(rawConfig, &config)
 	if err != nil {
-		fmt.Print(err)
+		log.Error(err)
 		return config, err
 	}
 
@@ -78,6 +77,7 @@ func configToBPFFilter(config Config) string {
 func main() {
 	flag.Parse()
 
+	log.SetFormatter(&log.JSONFormatter{})
 	log.Info(fmt.Sprintf("Starting up, verbose=%v, configPath='%s'", *verbose, *configPath))
 	if *verbose {
 		log.SetLevel(log.DebugLevel)
@@ -85,7 +85,7 @@ func main() {
 
 	config, err := readConfig(*configPath)
 	if err != nil {
-		fmt.Print(err)
+		log.Error(err)
 		return
 	}
 
@@ -104,44 +104,37 @@ func main() {
 
 	err = handle.SetBPFFilter(bpfFilter)
 	if err != nil {
-		log.Fatalf("error applying BPF Filter %s - %v", bpfFilter, err)
+		log.Fatalf("error applying BPF Filter ", bpfFilter, "  error:", err)
 	}
-	fmt.Printf("Applying BPF filter: %s\n", bpfFilter)
+	log.Info("Applying BPF filter: ", bpfFilter)
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
+	// we use the network traffic only to trigger a full scan, as what we are looking for is containers we can't really match per port
 	for packet := range packetSource.Packets() {
-		//fmt.Printf("Got packet: %s\n", packet)
 		var foundService string
-		var ipIsIn bool
+		var foundDstIP, foundSrcIP bool
 		if ip4layer := packet.Layer(layers.LayerTypeIPv4); ip4layer != nil {
 			layerData, _ := ip4layer.(*layers.IPv4)
 			log.Debug("Got packet ", packet)
-			//fmt.Printf("Got dstIP: %s\n", layerData.DstIP.String())
-			//fmt.Printf("Got srcIP: %s\n", layerData.SrcIP.String())
-			foundService, ipIsIn = ipToService[layerData.DstIP.String()]
-			if ipIsIn {
-				log.Info("Detected contact to service ", foundService)
-				user, err := getUser(packet, true)
+			foundService, foundDstIP = ipToService[layerData.DstIP.String()]
+			if !foundDstIP {
+				foundService, foundSrcIP = ipToService[layerData.SrcIP.String()]
+			}
+			if foundDstIP || foundSrcIP {
+				log.Info("Detected contact with service ", foundService)
+				log.Info("Triggering a full re-scan")
+				userToService, err := getUserAndInterestingServices(packet, true, &ipToService)
 				if err != nil {
 					log.Warn("    unable to get process for packet: ", err)
-				} else if user == "0" {
-					log.Warn("    too slow to get process info for packet")
-				} else {
-					log.Info("    from user ", user)
 				}
-				continue
-			}
-			foundService, ipIsIn = ipToService[layerData.SrcIP.String()]
-			if ipIsIn {
-				log.Info("Detected contact from service ", foundService)
-				user, err := getUser(packet, false)
-				if err != nil {
-					log.Warn("    unable to get process info for packet: ", err)
-				} else if user == "0" {
-					log.Warn("    too slow to get process for packet")
-				} else {
-					log.Info("    from user ", user)
+				for userID, services := range userToService {
+					user, err := user.LookupId(strconv.Itoa(userID))
+					if err != nil {
+						log.Warn("Unable to resolve user id ", userID, ", ignoring...")
+						continue
+					}
+					log.Info("  User:", user.Name, " services:", services)
 				}
 				continue
 			}
@@ -150,42 +143,23 @@ func main() {
 	}
 }
 
-func portToInt(port string) (int, error) {
-	maybePort := strings.Split(port, "(")[0]
-	return strconv.Atoi(maybePort)
-}
-
-func getUser(packet gopacket.Packet, localIsSrc bool) (string, error) {
-	var port int
+func getUserAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string) (map[int]map[string]netstat.Void, error) {
 	var err error
 	var protocol *netstat.Protocol
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		layerData, _ := tcpLayer.(*layers.TCP)
 		protocol = netstat.TCP
-		if localIsSrc {
-			port, err = portToInt(layerData.SrcPort.String())
-		} else {
-			port, err = portToInt(layerData.DstPort.String())
-		}
 
 	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
-		layerData, _ := tcpLayer.(*layers.UDP)
 		protocol = netstat.UDP
-		if localIsSrc {
-			port, err = portToInt(layerData.SrcPort.String())
-		} else {
-			port, err = portToInt(layerData.DstPort.String())
-		}
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	connection, err := netstat.FindConnectionFromLocalPortPerProcess(port, protocol)
+	userToService, err := netstat.FindUsersUsingInterestingServices(ipToService, protocol)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	user, err := user.LookupId(strconv.Itoa(connection.UserID))
-	return user.Name, err
+	return userToService, err
 }
