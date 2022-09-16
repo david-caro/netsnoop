@@ -1,4 +1,4 @@
-package netstat
+package utils
 
 import (
 	"bufio"
@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,40 +22,47 @@ type Void struct{}
 
 var member Void
 
-type Protocol struct {
-	// RelPath is the proc file path relative to the process directory
-	RelPath string
-}
-
-type Process struct {
-	Protocol *Protocol
-	Pid      int
-}
-
 // ProcRoot should point to the root of the proc file system
 var ProcRoot = "/proc"
 
 var (
 	// TCP contains the standard location to read open TCP IPv4 connections.
-	TCP = &Protocol{"net/tcp"}
+	TCP = "net/tcp"
 	// TCP6 contains the standard location to read open TCP IPv6 connections.
-	TCP6 = &Protocol{"net/tcp6"}
+	TCP6 = "net/tcp6"
 	// UDP contains the standard location to read open UDP IPv4 connections.
-	UDP = &Protocol{"net/udp"}
+	UDP = "net/udp"
 	// UDP6 contains the standard location to read open UDP IPv6 connections.
-	UDP6 = &Protocol{"net/udp6"}
+	UDP6 = "net/udp6"
 )
 
-func (p *Process) getInterestingServices(ipToService *map[string]string, userServices *map[string]Void) error {
-	lines, err := p.readProcNetFile()
-	if err != nil {
-		return err
-	}
-	p.findInterestingIPs(lines, ipToService, userServices)
-	return nil
+type Process struct {
+	Protocol string
+	Pid      int
 }
 
-func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol *Protocol, pid int, userServices *map[string]Void) {
+// reads the specific process file
+func (p *Process) readProcNetFile() ([][]string, error) {
+	var lines [][]string
+	var err error
+
+	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), p.Protocol)
+	log.Debug("        reading proc net file ", path)
+	lines, err = readProcNetFile(path)
+	return lines, err
+}
+
+func (p *Process) getInterestingServices(ipToService *map[string]string) (*map[string]Void, error) {
+	lines, err := p.readProcNetFile()
+	if err != nil {
+		return nil, err
+	}
+	interestingServices := findInterestingIPs(lines, ipToService, p.Protocol, p.Pid)
+	return interestingServices, nil
+}
+
+func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol string, pid int) *map[string]Void {
+	interestingServices := make(map[string]Void)
 	for _, line := range lines {
 		remoteIPPort := strings.Split(line[2], ":")
 		remoteIP := parseIP(remoteIPPort[0])
@@ -64,12 +73,9 @@ func findInterestingIPs(lines [][]string, ipToService *map[string]string, protoc
 		}
 		log.Debug("    found interesting ip ", remoteIP.String(), " part of service ", interestingService)
 
-		(*userServices)[interestingService] = member
+		interestingServices[interestingService] = member
 	}
-}
-
-func (p *Process) findInterestingIPs(lines [][]string, ipToService *map[string]string, userServices *map[string]Void) {
-	findInterestingIPs(lines, ipToService, p.Protocol, p.Pid, userServices)
+	return &interestingServices
 }
 
 func getUserFromFile(path string) string {
@@ -88,13 +94,12 @@ func getUserFromFile(path string) string {
 	return userName.Name
 }
 
-func FindUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol *Protocol) (map[string]map[string]Void, error) {
-	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol.RelPath)
-	usersUsingInterestingServices := make(map[string]map[string]Void)
+func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersToServices *map[string]map[string]int) error {
+	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
 	log.Debug("Searching for proc dirs matching ", globStr)
 	procDirs, err := filepath.Glob(globStr)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	log.Debug(fmt.Sprintf("Checking for any process is connecting to any interesting IPs under %d proc dirs", len(procDirs)))
 	for _, netFile := range procDirs {
@@ -106,39 +111,45 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 		}
 		pid, err := strconv.Atoi(procDirName)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		process := Process{
 			Pid:      pid,
 			Protocol: protocol,
 		}
-		interestingServices := make(map[string]Void)
-		process.getInterestingServices(ipToService, &interestingServices)
-		if len(interestingServices) != 0 {
+		interestingServices, err := process.getInterestingServices(ipToService)
+		if err != nil {
+			return err
+		}
+		if len(*interestingServices) != 0 {
 			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName))
 			if !strings.HasPrefix(userName, usersPrefix) {
 				log.Debug("        skipping non interesting user ", userName)
 				continue
 			}
 			log.Debug("        found services (", interestingServices, ") for user ", userName)
-			userServices, ok := usersUsingInterestingServices[userName]
+			userServices, ok := (*usersToServices)[userName]
 			if !ok {
-				userServices = make(map[string]Void)
+				userServices = make(map[string]int)
 			}
-			for service := range interestingServices {
-				userServices[service] = member
+			for service := range *interestingServices {
+				if curCount, ok := userServices[service]; ok {
+					userServices[service] = curCount + 1
+				} else {
+					userServices[service] = 1
+				}
 			}
-			usersUsingInterestingServices[userName] = userServices
+			(*usersToServices)[userName] = userServices
 		} else {
 			log.Debug("        got nothing xd! from dir ", netFile)
 		}
 	}
-	if len(usersUsingInterestingServices) == 0 {
+	if len(*usersToServices) == 0 {
 		log.Debug("Found no process using any interesting services!", ipToService)
-		return nil, fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
+		return fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
 	}
-	return usersUsingInterestingServices, nil
+	return nil
 }
 
 func readProcNetFile(procFilePath string) ([][]string, error) {
@@ -165,17 +176,6 @@ func readProcNetFile(procFilePath string) ([][]string, error) {
 	}
 	// Remove header line
 	return lines[1:], nil
-}
-
-// reads the specific process file
-func (p *Process) readProcNetFile() ([][]string, error) {
-	var lines [][]string
-	var err error
-
-	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), p.Protocol.RelPath)
-	log.Debug("        reading proc net file ", path)
-	lines, err = readProcNetFile(path)
-	return lines, err
 }
 
 // The values in a line are separated by one or more space.
@@ -206,4 +206,25 @@ func parseIPSegments(ip string) []uint8 {
 		segments = append(segments, uint8(seg))
 	}
 	return segments
+}
+
+func GetUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string, usersToServices *map[string]map[string]int) error {
+	var err error
+	var protocol string
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		protocol = TCP
+
+	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
+		protocol = UDP
+	}
+	if err != nil {
+		return err
+	}
+
+	err = findUsersUsingInterestingServices(ipToService, usersPrefix, protocol, usersToServices)
+	if err != nil {
+		return err
+	}
+
+	return err
 }

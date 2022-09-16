@@ -3,73 +3,35 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
+	"time"
 
-	"github.com/david-caro/netsnoop/internal/netstat"
+	configMod "github.com/david-caro/netsnoop/internal/config"
+	"github.com/david-caro/netsnoop/internal/utils"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v3"
 )
 
 var iface = flag.String("iface", "wlp0s20f3", "Select interface where to capture")
 var configPath = flag.String("configPath", "./netsnoop.yaml", "Path to the configuration yaml file")
 var verbose = flag.Bool("verbose", false, "Enable verbose logging")
+var promPath = flag.String("promPath", "./netsnoop.prom", "File to output prometheus stats")
+var writePromSecs = flag.Uint("writePromSecs", 60, "How often to write down the prometheus statistics")
 
-type Service struct {
-	IPs []string `yaml:"ips"`
-}
-
-type Config struct {
-	InterestingServices    map[string]Service `yaml:"interesting_services"`
-	InterestingUsersPrefix string             `yaml:"interesting_users_prefix"`
-}
-
-func readConfig(configPath string) (Config, error) {
-	config := Config{}
-	// this is deprecated but we have golang go1.11.6 in prod hosts, replace with os.ReadFile once we get on >1.16
-	rawConfig, err := ioutil.ReadFile(configPath)
-	if err != nil {
-		log.Error(err)
-		return config, err
-	}
-
-	err = yaml.Unmarshal(rawConfig, &config)
-	if err != nil {
-		log.Error(err)
-		return config, err
-	}
-
-	return config, nil
-}
-
-func getIPToService(config Config) map[string]string {
-	ipToService := make(map[string]string)
-	for serviceName, service := range config.InterestingServices {
-		for _, ip := range service.IPs {
-			ipToService[ip] = serviceName
+func writePromFile(path *string, counter *map[string]map[string]int) error {
+	promData := "# HELP toolforge_internal_dependencies Number of times a tool has known to start a connection to the given known dependency\n"
+	promData += "# TYPE toolforge_internal_dependencies counter\n"
+	for toolName, sites := range *counter {
+		for site, count := range sites {
+			promData += fmt.Sprintf("toolforge_internal_dependencies{tool=\"%s\", dependency=\"%s\"} %d\n", toolName, site, count)
 		}
 	}
-	return ipToService
-}
-
-func configToBPFFilter(config Config) string {
-	bpfFilter := "((tcp and tcp[tcpflags] & tcp-syn != 0) or udp) and ("
-	firstFilter := true
-	for _, service := range config.InterestingServices {
-		for _, ip := range service.IPs {
-			if firstFilter {
-				bpfFilter += "dst host " + ip
-				firstFilter = false
-			} else {
-				bpfFilter += " or dst host " + ip
-			}
-		}
-	}
-	bpfFilter += ")"
-	return bpfFilter
+	err := os.WriteFile(*path, []byte(promData), 0644)
+	log.Debug("Wrote prometheus file ", path)
+	return err
 }
 
 func main() {
@@ -81,24 +43,45 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	config, err := readConfig(*configPath)
+	config, err := configMod.ReadConfig(*configPath)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 
-	bpfFilter := configToBPFFilter(config)
-	ipToService := getIPToService(config)
+	bpfFilter := configMod.ConfigToBPFFilter(config)
+	ipToService := configMod.GetIPToService(config)
 
 	// Opening Device
 	// for now capturing size 0, not interested in the contents
-	// not interested in promiscuous listening
+	// not interested in promiscuous listening either, only packets from this host
 	handle, err := pcap.OpenLive(*iface, int32(0), false, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	defer handle.Close()
+
+	ticker := time.NewTicker(5 * time.Second)
+	quit := make(chan struct{})
+	counters := make(chan map[string]map[string]int)
+	go func() {
+		for {
+			log.Debug("Waiting for ticker....")
+			select {
+			case <-ticker.C:
+				log.Debug("Waiting for counts....")
+				counts := <-counters
+				log.Info("Got counts ", counts)
+				writePromFile(promPath, &counts)
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+
+	defer ticker.Stop()
 
 	err = handle.SetBPFFilter(bpfFilter)
 	if err != nil {
@@ -108,51 +91,42 @@ func main() {
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
+	usersToServicesCount := make(map[string]map[string]int)
+
+	last_stat_time := time.Now()
 	// we use the network traffic only to trigger a full scan, as what we are looking for is containers we can't really match per port
-	for packet := range packetSource.Packets() {
-		var foundService string
-		var foundDstIP, foundSrcIP bool
-		if ip4layer := packet.Layer(layers.LayerTypeIPv4); ip4layer != nil {
-			layerData, _ := ip4layer.(*layers.IPv4)
-			log.Debug("Got packet ", packet)
-			foundService, foundDstIP = ipToService[layerData.DstIP.String()]
-			if !foundDstIP {
-				foundService, foundSrcIP = ipToService[layerData.SrcIP.String()]
-			}
-			if foundDstIP || foundSrcIP {
-				log.Debug("Detected contact with service ", foundService)
-				log.Debug("Triggering a full re-scan")
-				usersToServices, err := getUsersAndInterestingServices(packet, true, &ipToService, config.InterestingUsersPrefix)
-				if err != nil {
-					log.Warn("    unable to get process for packet: ", err)
+	packetChannel := packetSource.Packets()
+	for {
+		select {
+		case packet := <-packetChannel:
+			var foundService string
+			var foundDstIP, foundSrcIP bool
+			if ip4layer := packet.Layer(layers.LayerTypeIPv4); ip4layer != nil {
+				layerData, _ := ip4layer.(*layers.IPv4)
+				log.Debug("Got packet ", packet)
+				foundService, foundDstIP = ipToService[layerData.DstIP.String()]
+				if !foundDstIP {
+					foundService, foundSrcIP = ipToService[layerData.SrcIP.String()]
 				}
-				for userName, services := range usersToServices {
-					log.Info("  User:", userName, " services:", services)
+				if foundDstIP || foundSrcIP {
+					log.Debug("Detected contact with service ", foundService)
+					log.Debug("Triggering a full re-scan")
+					err := utils.GetUsersAndInterestingServices(packet, true, &ipToService, config.InterestingUsersPrefix, &usersToServicesCount)
+					if err != nil {
+						log.Warn("    unable to get process for packet: ", err)
+					}
+					for userName, services := range usersToServicesCount {
+						log.Debug("  User:", userName, " services:", services)
+					}
+					continue
 				}
-				continue
+				log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
 			}
-			log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
+		default:
+			if time.Since(last_stat_time) > time.Duration(*writePromSecs)*time.Second {
+				log.Debug("Sending counts...")
+				counters <- usersToServicesCount
+			}
 		}
 	}
-}
-
-func getUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string) (map[string]map[string]netstat.Void, error) {
-	var err error
-	var protocol *netstat.Protocol
-	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		protocol = netstat.TCP
-
-	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
-		protocol = netstat.UDP
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	userToService, err := netstat.FindUsersUsingInterestingServices(ipToService, usersPrefix, protocol)
-	if err != nil {
-		return nil, err
-	}
-
-	return userToService, err
 }
