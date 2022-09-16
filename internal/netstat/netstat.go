@@ -116,7 +116,7 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 		interestingServices := make(map[string]Void)
 		process.getInterestingServices(ipToService, &interestingServices)
 		if len(interestingServices) != 0 {
-			userName := getUserFromFile(netFile)
+			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName))
 			log.Debug("        found services (", interestingServices, ") for user ", userName)
 			userServices, ok := usersUsingInterestingServices[userName]
 			if !ok {
@@ -169,7 +169,7 @@ func (p *Process) readProcNetFile() ([][]string, error) {
 	var err error
 
 	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), p.Protocol.RelPath)
-	log.Debug("reading proc net file ", path)
+	log.Debug("        reading proc net file ", path)
 	lines, err = readProcNetFile(path)
 	return lines, err
 }
