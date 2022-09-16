@@ -53,6 +53,7 @@ func findConnectionFromLocalPort(lines [][]string, localPort int, protocol *Prot
 	for _, line := range lines {
 		localIPPortHex := strings.Split(line[1], ":")
 		gottenLocalPort := parsePort(localIPPortHex[1])
+		log.Debug("     matching local port ", localPort, " with gotten port ", gottenLocalPort)
 		if localPort != gottenLocalPort {
 			continue
 		}

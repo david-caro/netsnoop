@@ -18,7 +18,6 @@ import (
 )
 
 var iface = flag.String("iface", "wlp0s20f3", "Select interface where to capture")
-var promisc = flag.Bool("promisc", false, "Enable promiscuous mode")
 var configPath = flag.String("configPath", "./netsnoop.yaml", "Path to the configuration yaml file")
 var verbose = flag.Bool("verbose", false, "Enable verbose logging")
 
@@ -95,7 +94,8 @@ func main() {
 
 	// Opening Device
 	// for now capturing size 0, not interested in the contents
-	handle, err := pcap.OpenLive(*iface, int32(0), *promisc, pcap.BlockForever)
+	// not interested in promiscuous listening
+	handle, err := pcap.OpenLive(*iface, int32(0), false, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -116,35 +116,36 @@ func main() {
 		var ipIsIn bool
 		if ip4layer := packet.Layer(layers.LayerTypeIPv4); ip4layer != nil {
 			layerData, _ := ip4layer.(*layers.IPv4)
+			log.Debug("Got packet ", packet)
 			//fmt.Printf("Got dstIP: %s\n", layerData.DstIP.String())
 			//fmt.Printf("Got srcIP: %s\n", layerData.SrcIP.String())
 			foundService, ipIsIn = ipToService[layerData.DstIP.String()]
 			if ipIsIn {
-				fmt.Printf("Detected contact to service '%s'\n", foundService)
+				log.Info("Detected contact to service ", foundService)
 				user, err := getUser(packet, true)
 				if err != nil {
-					fmt.Printf("    unable to get process for packet: %s\n", err)
+					log.Warn("    unable to get process for packet: ", err)
 				} else if user == "0" {
-					fmt.Printf("    too slow to get process info for packet\n")
+					log.Warn("    too slow to get process info for packet")
 				} else {
-					fmt.Printf("    from user %s\n", user)
+					log.Info("    from user ", user)
 				}
 				continue
 			}
 			foundService, ipIsIn = ipToService[layerData.SrcIP.String()]
 			if ipIsIn {
-				fmt.Printf("Detected contact from service '%s'\n", foundService)
+				log.Info("Detected contact from service ", foundService)
 				user, err := getUser(packet, false)
 				if err != nil {
-					fmt.Printf("    unable to get process info for packet: %s\n", err)
+					log.Warn("    unable to get process info for packet: ", err)
 				} else if user == "0" {
-					fmt.Printf("    too slow to get process for packet\n")
+					log.Warn("    too slow to get process for packet")
 				} else {
-					fmt.Printf("    from user %s\n", user)
+					log.Info("    from user ", user)
 				}
 				continue
 			}
-			fmt.Printf("Detected unknown ip %s\n", packet.NetworkLayer().NetworkFlow().Dst().String())
+			log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
 		}
 	}
 }
