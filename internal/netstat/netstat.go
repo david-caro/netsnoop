@@ -100,6 +100,9 @@ func FindConnectionFromLocalPortPerProcess(localPort int, protocol *Protocol) (C
 		log.Debug("   got process dir", netFile)
 		dirChunks := strings.Split(netFile, "/")
 		procDirName := dirChunks[len(dirChunks)-3]
+		if procDirName == "self" {
+			continue
+		}
 		pid, err := strconv.Atoi(procDirName)
 		if err != nil {
 			return Connection{}, err
