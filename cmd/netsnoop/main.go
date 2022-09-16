@@ -64,10 +64,10 @@ func configToBPFFilter(config Config) string {
 	for _, service := range config.InterestingServices {
 		for _, ip := range service.IPs {
 			if firstFilter {
-				bpfFilter += " host " + ip
+				bpfFilter += "dst host " + ip
 				firstFilter = false
 			} else {
-				bpfFilter += " or host " + ip
+				bpfFilter += " or dst host " + ip
 			}
 		}
 	}
