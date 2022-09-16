@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os/user"
 	"strconv"
 	"strings"
@@ -14,19 +13,22 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 var iface = flag.String("iface", "wlp0s20f3", "Select interface where to capture")
 var promisc = flag.Bool("promisc", false, "Enable promiscuous mode")
 var configPath = flag.String("configPath", "./netsnoop.yaml", "Path to the configuration yaml file")
+var verbose = flag.Bool("verbose", false, "Enable verbose logging")
 
 type Service struct {
 	IPs []string `yaml:"ips"`
 }
 
 type Config struct {
-	InterestingServices map[string]Service `yaml:"interesting_services"`
+	InterestingServices         map[string]Service `yaml:"interesting_services"`
+	InterestingProcessNameMatch string             `yaml:"interesting_process_name_match"`
 }
 
 func readConfig(configPath string) (Config, error) {
@@ -75,10 +77,12 @@ func configToBPFFilter(config Config) string {
 }
 
 func main() {
-	log.Println("start")
-	defer log.Println("end")
-
 	flag.Parse()
+
+	log.Info(fmt.Sprintf("Starting up, verbose=%v, configPath='%s'", *verbose, *configPath))
+	if *verbose {
+		log.SetLevel(log.DebugLevel)
+	}
 
 	config, err := readConfig(*configPath)
 	if err != nil {
@@ -153,8 +157,10 @@ func portToInt(port string) (int, error) {
 func getUser(packet gopacket.Packet, localIsSrc bool) (string, error) {
 	var port int
 	var err error
+	var protocol *netstat.Protocol
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		layerData, _ := tcpLayer.(*layers.TCP)
+		protocol = netstat.TCP
 		if localIsSrc {
 			port, err = portToInt(layerData.SrcPort.String())
 		} else {
@@ -163,6 +169,7 @@ func getUser(packet gopacket.Packet, localIsSrc bool) (string, error) {
 
 	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
 		layerData, _ := tcpLayer.(*layers.UDP)
+		protocol = netstat.UDP
 		if localIsSrc {
 			port, err = portToInt(layerData.SrcPort.String())
 		} else {
@@ -173,11 +180,11 @@ func getUser(packet gopacket.Packet, localIsSrc bool) (string, error) {
 		return "", err
 	}
 
-	connection, err := netstat.TCP.ConnectionFromLocalPort(port)
+	connection, err := netstat.FindConnectionFromLocalPortPerProcess(port, protocol)
 	if err != nil {
 		return "", err
 	}
 
-	user, err := user.LookupId(connection.UserID)
+	user, err := user.LookupId(strconv.Itoa(connection.UserID))
 	return user.Name, err
 }

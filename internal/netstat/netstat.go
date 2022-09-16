@@ -6,22 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
-// Protocol points to a file in the proc filesystem where information
-// about open sockets can be gathered.
 type Protocol struct {
-	// Name contains the protocol name. Not used internally.
-	Name string
-	// RelPath is the proc file path relative to ProcRoot
+	// RelPath is the proc file path relative to the process directory
 	RelPath string
+}
+
+type Process struct {
+	Protocol *Protocol
+	Pid      int
 }
 
 // ProcRoot should point to the root of the proc file system
@@ -29,37 +30,26 @@ var ProcRoot = "/proc"
 
 var (
 	// TCP contains the standard location to read open TCP IPv4 connections.
-	TCP = &Protocol{"tcp", "net/tcp"}
+	TCP = &Protocol{"net/tcp"}
 	// TCP6 contains the standard location to read open TCP IPv6 connections.
-	TCP6 = &Protocol{"tcp6", "net/tcp6"}
+	TCP6 = &Protocol{"net/tcp6"}
 	// UDP contains the standard location to read open UDP IPv4 connections.
-	UDP = &Protocol{"udp", "net/udp"}
+	UDP = &Protocol{"net/udp"}
 	// UDP6 contains the standard location to read open UDP IPv6 connections.
-	UDP6 = &Protocol{"udp6", "net/udp6"}
+	UDP6 = &Protocol{"net/udp6"}
 )
 
-var (
-	procFdLinkParseType1 = regexp.MustCompile(`^socket:\[(\d+)\]$`)
-	procFdLinkParseType2 = regexp.MustCompile(`^\[0000\]:(\d+)$`)
-)
-
-func (p *Protocol) ConnectionFromLocalPort(localPort int) (Connection, error) {
-	inodeToPid := make(chan map[uint64]int)
-
-	go func() {
-		inodeToPid <- procFdInodeToPid()
-	}()
-
+func (p *Process) ConnectionFromLocalPort(localPort int) (Connection, error) {
 	lines, err := p.readProcNetFile()
 	if err != nil {
 		return Connection{}, err
 	}
 
-	connection, err := p.findConnectionFromLocalPort(lines, <-inodeToPid, localPort)
+	connection, err := p.findConnectionFromLocalPort(lines, localPort)
 	return connection, err
 }
 
-func (p *Protocol) findConnectionFromLocalPort(lines [][]string, inodeToPid map[uint64]int, localPort int) (Connection, error) {
+func findConnectionFromLocalPort(lines [][]string, localPort int, protocol *Protocol, pid int) (Connection, error) {
 	for _, line := range lines {
 		localIPPortHex := strings.Split(line[1], ":")
 		gottenLocalPort := parsePort(localIPPortHex[1])
@@ -67,26 +57,24 @@ func (p *Protocol) findConnectionFromLocalPort(lines [][]string, inodeToPid map[
 			continue
 		}
 		remoteIPPort := strings.Split(line[2], ":")
-		//fmt.Printf("  line: %v\n", line)
-		inode := parseUint64(line[9])
-		//fmt.Printf("  inodeToPid (inode=%v): %v\n", inode, inodeToPid)
-		pid := inodeToPid[inode]
-		queues := strings.Split(line[4], ":")
+
+		userID, err := strconv.Atoi(line[7])
+		if err != nil {
+			return Connection{}, err
+		}
 
 		connection := &Connection{
-			Exe:           procGetExe(pid),
-			Cmdline:       procGetCmdline(pid),
-			Pid:           pid,
-			Inode:         inode,
-			UserID:        line[7],
-			IP:            parseIP(localIPPortHex[0]),
-			Port:          localPort,
-			RemoteIP:      parseIP(remoteIPPort[0]),
-			RemotePort:    parsePort(remoteIPPort[1]),
-			State:         tcpStateFromHex(line[3]),
-			TransmitQueue: parseUint64(queues[0]),
-			ReceiveQueue:  parseUint64(queues[1]),
-			Protocol:      p,
+			Pid:        pid,
+			UserID:     userID,
+			IP:         parseIP(localIPPortHex[0]),
+			Port:       localPort,
+			RemoteIP:   parseIP(remoteIPPort[0]),
+			RemotePort: parsePort(remoteIPPort[1]),
+			Protocol:   protocol,
+		}
+
+		if connection.UserID != 0 {
+			return *connection, nil
 		}
 
 		//fmt.Printf("Got connection %v\n", connection)
@@ -96,16 +84,45 @@ func (p *Protocol) findConnectionFromLocalPort(lines [][]string, inodeToPid map[
 	return Connection{}, errors.New("unable to get process for port")
 }
 
-func parseUint64(num string) uint64 {
-	inode, _ := strconv.ParseUint(num, 10, 64)
-	return inode
+func (p *Process) findConnectionFromLocalPort(lines [][]string, localPort int) (Connection, error) {
+	return findConnectionFromLocalPort(lines, localPort, p.Protocol, p.Pid)
 }
 
-func (p *Protocol) readProcNetFile() ([][]string, error) {
+func FindConnectionFromLocalPortPerProcess(localPort int, protocol *Protocol) (Connection, error) {
+	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol.RelPath)
+	log.Debug("Searching for proc dirs matching ", globStr)
+	procDirs, err := filepath.Glob(globStr)
+	if err != nil {
+		return Connection{}, err
+	}
+	log.Debug(fmt.Sprintf("Checking for any process using local port %d under %d proc dirs", localPort, len(procDirs)))
+	for _, netFile := range procDirs {
+		log.Debug("   got process dir", netFile)
+		dirChunks := strings.Split(netFile, "/")
+		procDirName := dirChunks[len(dirChunks)-3]
+		pid, err := strconv.Atoi(procDirName)
+		if err != nil {
+			return Connection{}, err
+		}
+
+		process := Process{
+			Pid:      pid,
+			Protocol: protocol,
+		}
+		connection, _ := process.ConnectionFromLocalPort(localPort)
+		if connection.Pid != 0 {
+			log.Debug("Got connection!", connection)
+			return connection, nil
+		}
+		log.Debug("Got nothing xd!", connection)
+	}
+	return Connection{}, fmt.Errorf("unable to find process using local port %d", localPort)
+}
+
+func readProcNetFile(procFilePath string) ([][]string, error) {
 	var lines [][]string
 
-	path := filepath.Join(ProcRoot, p.RelPath)
-	f, err := os.Open(path)
+	f, err := os.Open(procFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("can't open proc file: %s", err)
 	}
@@ -122,10 +139,21 @@ func (p *Protocol) readProcNetFile() ([][]string, error) {
 		lines = append(lines, lineParts(string(bytes.Trim(line, "\t\n "))))
 	}
 	if len(lines) == 0 {
-		return nil, fmt.Errorf("can't read proc file: %s has no content", path)
+		return nil, fmt.Errorf("can't read proc file: %s has no content", procFilePath)
 	}
 	// Remove header line
 	return lines[1:], nil
+}
+
+// reads the specific process file
+func (p *Process) readProcNetFile() ([][]string, error) {
+	var lines [][]string
+	var err error
+
+	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), p.Protocol.RelPath)
+	log.Debug("reading proc net file ", path)
+	lines, err = readProcNetFile(path)
+	return lines, err
 }
 
 // The values in a line are separated by one or more space.
@@ -162,67 +190,4 @@ func parseIPSegments(ip string) []uint8 {
 		segments = append(segments, uint8(seg))
 	}
 	return segments
-}
-
-func procGetCmdline(pid int) []string {
-	path := filepath.Join(ProcRoot, strconv.Itoa(pid), "cmdline")
-	content, err := ioutil.ReadFile(path)
-	if err != nil {
-		return []string{}
-	}
-	content = bytes.TrimRight(content, "\x00")
-	return strings.Split(string(content), "\x00")
-}
-
-func procGetExe(pid int) string {
-	path := filepath.Join(ProcRoot, strconv.Itoa(pid), "exe")
-	//fmt.Printf("     exec: trying to extract from %s\n", path)
-	target, err := os.Readlink(path)
-	if err != nil {
-		return ""
-	}
-	//fmt.Printf("Got exec: %s\n", target)
-	return target
-}
-
-func procFdInodeToPid() map[uint64]int {
-	inodeToPid := make(map[uint64]int)
-
-	// Ignoring error: The only possible error is bad pattern.
-	paths, _ := filepath.Glob(filepath.Join(ProcRoot, "[0-9]*/fd/[0-9]*"))
-	for _, link := range paths {
-		target, err := os.Readlink(link)
-		if err != nil {
-			continue
-		}
-
-		pid := procFdExtractPid(link)
-		inode, found := procFdExtractInode(target)
-		if !found {
-			continue
-		}
-
-		inodeToPid[inode] = pid
-	}
-
-	return inodeToPid
-}
-
-func procFdExtractPid(fdPath string) int {
-	parts := strings.SplitN(fdPath, string(filepath.Separator), 4)
-	pid, _ := strconv.ParseInt(parts[2], 10, 64)
-	return int(pid)
-}
-
-func procFdExtractInode(fdLinkTarget string) (inode uint64, found bool) {
-	match := procFdLinkParseType1.FindStringSubmatch(fdLinkTarget)
-	if match == nil {
-		match = procFdLinkParseType2.FindStringSubmatch(fdLinkTarget)
-		if match == nil {
-			return 0, false
-		}
-	}
-
-	inode, _ = strconv.ParseUint(match[1], 10, 64)
-	return inode, true
 }
