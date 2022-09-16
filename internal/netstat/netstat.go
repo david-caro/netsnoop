@@ -98,7 +98,7 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 	}
 	log.Debug(fmt.Sprintf("Checking for any process is connecting to any interesting IPs under %d proc dirs", len(procDirs)))
 	for _, netFile := range procDirs {
-		log.Debug("   got process dir", netFile)
+		log.Debug("   looking into process dir", netFile)
 		dirChunks := strings.Split(netFile, "/")
 		procDirName := dirChunks[len(dirChunks)-3]
 		if procDirName == "self" || procDirName == "thread-self" {
@@ -117,7 +117,7 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 		process.getInterestingServices(ipToService, &interestingServices)
 		if len(interestingServices) != 0 {
 			userName := getUserFromFile(netFile)
-			log.Debug("    found services (", interestingServices, ") for user ", userName)
+			log.Debug("        found services (", interestingServices, ") for user ", userName)
 			userServices, ok := usersUsingInterestingServices[userName]
 			if !ok {
 				userServices = make(map[string]Void)
@@ -127,7 +127,7 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 			}
 			usersUsingInterestingServices[userName] = userServices
 		} else {
-			log.Debug("Got nothing xd!")
+			log.Debug("        got nothing xd! from dir ", netFile)
 		}
 	}
 	if len(usersUsingInterestingServices) == 0 {
