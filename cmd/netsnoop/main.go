@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
+	"io/ioutil"
 	"time"
 
 	configMod "github.com/david-caro/netsnoop/internal/config"
@@ -29,7 +29,8 @@ func writePromFile(path *string, counter *map[string]map[string]int) error {
 			promData += fmt.Sprintf("toolforge_internal_dependencies{tool=\"%s\", dependency=\"%s\"} %d\n", toolName, site, count)
 		}
 	}
-	err := os.WriteFile(*path, []byte(promData), 0644)
+	// needed as we use golang 1.11.6 and os.WriteFile is not supported yet
+	err := ioutil.WriteFile(*path, []byte(promData), 0644)
 	log.Debug("Wrote prometheus file ", path)
 	return err
 }
