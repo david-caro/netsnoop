@@ -7,9 +7,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -42,53 +44,53 @@ var (
 	UDP6 = &Protocol{"net/udp6"}
 )
 
-func (p *Process) getUserAndInterestingServices(ipToService *map[string]string) (map[int]map[string]Void, error) {
+func (p *Process) getInterestingServices(ipToService *map[string]string, userServices *map[string]Void) error {
 	lines, err := p.readProcNetFile()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	userToService, err := p.findUsersForInterestingIPs(lines, ipToService)
-	return userToService, err
+	p.findInterestingIPs(lines, ipToService, userServices)
+	return nil
 }
 
-func findUsersForInterestingIPs(lines [][]string, ipToService *map[string]string, protocol *Protocol, pid int) (map[int]map[string]Void, error) {
-	userToService := make(map[int]map[string]Void)
+func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol *Protocol, pid int, userServices *map[string]Void) {
 	for _, line := range lines {
 		remoteIPPort := strings.Split(line[2], ":")
 		remoteIP := parseIP(remoteIPPort[0])
-		log.Debug("     matching remote ip ", remoteIP.String())
 
 		interestingService, ok := (*ipToService)[remoteIP.String()]
 		if !ok {
-			log.Debug("    ", remoteIP.String(), " is not interesting for us")
 			continue
 		}
 		log.Debug("    found interesting ip ", remoteIP.String(), " part of service ", interestingService)
 
-		userID, err := strconv.Atoi(line[7])
-		if err != nil {
-			return userToService, err
-		}
-		log.Debug("    user: ", userID)
+		(*userServices)[interestingService] = member
+	}
+}
 
-		//fmt.Printf("Got connection %v\n", connection)
-		userServices, ok := userToService[userID]
-		if !ok {
-			userServices = make(map[string]Void)
-		}
-		userServices[interestingService] = member
-		userToService[userID] = userServices
+func (p *Process) findInterestingIPs(lines [][]string, ipToService *map[string]string, userServices *map[string]Void) {
+	findInterestingIPs(lines, ipToService, p.Protocol, p.Pid, userServices)
+}
+
+func getUserFromFile(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Error(err)
+		return "unknown"
 	}
 
-	return userToService, nil
+	stat := info.Sys().(*syscall.Stat_t)
+	userName, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
+	if err != nil {
+		log.Error(err)
+		return "unknown"
+	}
+	return userName.Name
 }
 
-func (p *Process) findUsersForInterestingIPs(lines [][]string, ipToService *map[string]string) (map[int]map[string]Void, error) {
-	return findUsersForInterestingIPs(lines, ipToService, p.Protocol, p.Pid)
-}
-
-func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol *Protocol) (map[int]map[string]Void, error) {
+func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol *Protocol) (map[string]map[string]Void, error) {
 	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol.RelPath)
+	usersUsingInterestingServices := make(map[string]map[string]Void)
 	log.Debug("Searching for proc dirs matching ", globStr)
 	procDirs, err := filepath.Glob(globStr)
 	if err != nil {
@@ -111,14 +113,28 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 			Pid:      pid,
 			Protocol: protocol,
 		}
-		userToService, _ := process.getUserAndInterestingServices(ipToService)
-		if len(userToService) != 0 {
-			log.Debug("Found process using interesting services!", userToService)
-			return userToService, nil
+		interestingServices := make(map[string]Void)
+		process.getInterestingServices(ipToService, &interestingServices)
+		if len(interestingServices) != 0 {
+			userName := getUserFromFile(netFile)
+			log.Debug("    found services (", interestingServices, ") for user ", userName)
+			userServices, ok := usersUsingInterestingServices[userName]
+			if !ok {
+				userServices = make(map[string]Void)
+			}
+			for service := range interestingServices {
+				userServices[service] = member
+			}
+			usersUsingInterestingServices[userName] = userServices
+		} else {
+			log.Debug("Got nothing xd!")
 		}
-		log.Debug("Got nothing xd!")
 	}
-	return nil, fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
+	if len(usersUsingInterestingServices) == 0 {
+		log.Debug("Found no process using any interesting services!", ipToService)
+		return nil, fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
+	}
+	return usersUsingInterestingServices, nil
 }
 
 func readProcNetFile(procFilePath string) ([][]string, error) {

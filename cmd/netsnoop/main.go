@@ -4,8 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"os/user"
-	"strconv"
 
 	"github.com/david-caro/netsnoop/internal/netstat"
 
@@ -124,17 +122,12 @@ func main() {
 			if foundDstIP || foundSrcIP {
 				log.Debug("Detected contact with service ", foundService)
 				log.Debug("Triggering a full re-scan")
-				userToService, err := getUserAndInterestingServices(packet, true, &ipToService)
+				usersToServices, err := getUsersAndInterestingServices(packet, true, &ipToService)
 				if err != nil {
 					log.Warn("    unable to get process for packet: ", err)
 				}
-				for userID, services := range userToService {
-					user, err := user.LookupId(strconv.Itoa(userID))
-					if err != nil {
-						log.Warn("Unable to resolve user id ", userID, ", ignoring...")
-						continue
-					}
-					log.Info("  User:", user.Name, " services:", services)
+				for userName, services := range usersToServices {
+					log.Info("  User:", userName, " services:", services)
 				}
 				continue
 			}
@@ -143,7 +136,7 @@ func main() {
 	}
 }
 
-func getUserAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string) (map[int]map[string]netstat.Void, error) {
+func getUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string) (map[string]map[string]netstat.Void, error) {
 	var err error
 	var protocol *netstat.Protocol
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {

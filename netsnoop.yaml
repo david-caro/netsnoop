@@ -1,4 +1,10 @@
 interesting_services:
+  "wikimedia.es":
+    ips:
+      - 195.201.53.168
+  "wikimedia.it":
+    ips:
+      - 51.75.90.142
   "meta.wikimedia.org":
     ips:
       - 208.80.154.224
