@@ -11,3 +11,5 @@ interesting_services:
   "login.toolforge.org":
     ips:
       - 185.15.56.66
+
+interesting_users_prefix: tools.

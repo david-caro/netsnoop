@@ -88,7 +88,7 @@ func getUserFromFile(path string) string {
 	return userName.Name
 }
 
-func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol *Protocol) (map[string]map[string]Void, error) {
+func FindUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol *Protocol) (map[string]map[string]Void, error) {
 	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol.RelPath)
 	usersUsingInterestingServices := make(map[string]map[string]Void)
 	log.Debug("Searching for proc dirs matching ", globStr)
@@ -117,6 +117,10 @@ func FindUsersUsingInterestingServices(ipToService *map[string]string, protocol 
 		process.getInterestingServices(ipToService, &interestingServices)
 		if len(interestingServices) != 0 {
 			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName))
+			if !strings.HasPrefix(userName, usersPrefix) {
+				log.Debug("        skipping non interesting user ", userName)
+				continue
+			}
 			log.Debug("        found services (", interestingServices, ") for user ", userName)
 			userServices, ok := usersUsingInterestingServices[userName]
 			if !ok {

@@ -23,8 +23,8 @@ type Service struct {
 }
 
 type Config struct {
-	InterestingServices         map[string]Service `yaml:"interesting_services"`
-	InterestingProcessNameMatch string             `yaml:"interesting_process_name_match"`
+	InterestingServices    map[string]Service `yaml:"interesting_services"`
+	InterestingUsersPrefix string             `yaml:"interesting_users_prefix"`
 }
 
 func readConfig(configPath string) (Config, error) {
@@ -122,7 +122,7 @@ func main() {
 			if foundDstIP || foundSrcIP {
 				log.Debug("Detected contact with service ", foundService)
 				log.Debug("Triggering a full re-scan")
-				usersToServices, err := getUsersAndInterestingServices(packet, true, &ipToService)
+				usersToServices, err := getUsersAndInterestingServices(packet, true, &ipToService, config.InterestingUsersPrefix)
 				if err != nil {
 					log.Warn("    unable to get process for packet: ", err)
 				}
@@ -136,7 +136,7 @@ func main() {
 	}
 }
 
-func getUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string) (map[string]map[string]netstat.Void, error) {
+func getUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string) (map[string]map[string]netstat.Void, error) {
 	var err error
 	var protocol *netstat.Protocol
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
@@ -149,7 +149,7 @@ func getUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipT
 		return nil, err
 	}
 
-	userToService, err := netstat.FindUsersUsingInterestingServices(ipToService, protocol)
+	userToService, err := netstat.FindUsersUsingInterestingServices(ipToService, usersPrefix, protocol)
 	if err != nil {
 		return nil, err
 	}
