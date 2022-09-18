@@ -47,6 +47,9 @@ func (p *Process) getNetNamespace() (string, error) {
 	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), "ns/net")
 	log.Debug("        reading proc namespace net file ", path)
 	dest, err := os.Readlink(path)
+	if !strings.HasPrefix(dest, "net:[") {
+		return "", fmt.Errorf("not a network namespace, but %v", dest)
+	}
 	return dest[len("net:[")-1 : len(dest)-1], err
 }
 
@@ -151,7 +154,7 @@ func findUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 			continue
 		}
 		if len(*interestingServices) != 0 {
-			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName, "ns/net"))
+			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName, "ns/ne"))
 			if !strings.HasPrefix(userName, usersPrefix) {
 				log.Debug("        skipping non interesting user ", userName)
 				continue
