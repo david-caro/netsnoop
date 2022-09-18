@@ -98,12 +98,13 @@ func getUserFromFile(path string) string {
 	}
 
 	stat := info.Sys().(*syscall.Stat_t)
-	userName, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
+	user, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
 	if err != nil {
 		log.Error(err)
 		return OtherUser
 	}
-	return userName.Name
+	log.Debug("Got user ", user.Name, " from file ", path)
+	return user.Name
 }
 
 func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersToServices *map[string]map[string]int) error {
