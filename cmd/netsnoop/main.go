@@ -115,6 +115,17 @@ func main() {
 					err := utils.GetUsersAndInterestingServices(packet, true, &ipToService, config.InterestingUsersPrefix, &usersToServicesCount)
 					if err != nil {
 						log.Warn("    unable to get process for packet: ", err)
+						otherUserServices, ok := usersToServicesCount[utils.OtherUser]
+						if !ok {
+							otherUserServices = make(map[string]int)
+						}
+						serviceCount, ok := otherUserServices[foundService]
+						if ok {
+							otherUserServices[foundService] = serviceCount + 1
+						} else {
+							otherUserServices[foundService] = 1
+						}
+						usersToServicesCount[utils.OtherUser] = otherUserServices
 					}
 					for userName, services := range usersToServicesCount {
 						log.Debug("  User:", userName, " services:", services)

@@ -21,6 +21,7 @@ import (
 type Void struct{}
 
 var member Void
+var OtherUser = "other"
 
 // ProcRoot should point to the root of the proc file system
 var ProcRoot = "/proc"
@@ -82,14 +83,14 @@ func getUserFromFile(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		log.Error(err)
-		return "unknown"
+		return OtherUser
 	}
 
 	stat := info.Sys().(*syscall.Stat_t)
 	userName, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
 	if err != nil {
 		log.Error(err)
-		return "unknown"
+		return OtherUser
 	}
 	return userName.Name
 }
@@ -120,7 +121,8 @@ func findUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 		}
 		interestingServices, err := process.getInterestingServices(ipToService)
 		if err != nil {
-			return err
+			log.Debug("Unable to read process network file ", netFile, " error:", err)
+			continue
 		}
 		if len(*interestingServices) != 0 {
 			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName))
@@ -157,6 +159,7 @@ func readProcNetFile(procFilePath string) ([][]string, error) {
 
 	f, err := os.Open(procFilePath)
 	if err != nil {
+		// this might happen when the process finished before we were able to read the file
 		return nil, fmt.Errorf("can't open proc file: %s", err)
 	}
 	defer f.Close()
