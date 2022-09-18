@@ -19,7 +19,7 @@ var iface = flag.String("iface", "wlp0s20f3", "Select interface where to capture
 var configPath = flag.String("configPath", "./netsnoop.yaml", "Path to the configuration yaml file")
 var verbose = flag.Bool("verbose", false, "Enable verbose logging")
 var promPath = flag.String("promPath", "./netsnoop.prom", "File to output prometheus stats")
-var writePromSecs = flag.Uint("writePromSecs", 60, "How often to write down the prometheus statistics")
+var refreshSecs = flag.Uint("refreshSecs", 60, "How often to show the stats and write down the prom file")
 
 func writePromFile(path *string, counter *map[string]map[string]int) error {
 	promData := "# HELP toolforge_internal_dependencies Number of times a tool has known to start a connection to the given known dependency\n"
@@ -124,7 +124,7 @@ func main() {
 				log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
 			}
 		default:
-			if time.Since(last_stat_time) > time.Duration(*writePromSecs)*time.Second {
+			if time.Since(last_stat_time) > time.Duration(*refreshSecs)*time.Second {
 				log.Debug("Sending counts...")
 				counters <- usersToServicesCount
 			}
