@@ -42,6 +42,14 @@ type Process struct {
 	Pid      int
 }
 
+// reads the specific network namespace process file
+func (p *Process) getNetNamespace() (string, error) {
+	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), "ns/net")
+	log.Debug("        reading proc namespace net file ", path)
+	dest, err := os.Readlink(path)
+	return dest[len("net:[")-1 : len(dest)-1], err
+}
+
 // reads the specific process file
 func (p *Process) readProcNetFile() ([][]string, error) {
 	var lines [][]string
@@ -96,15 +104,22 @@ func getUserFromFile(path string) string {
 }
 
 func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersToServices *map[string]map[string]int) error {
+	knownNamespaces := make(map[string]bool, 25)
 	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
+
 	log.Debug("Searching for proc dirs matching ", globStr)
 	procDirs, err := filepath.Glob(globStr)
 	if err != nil {
 		return err
 	}
-	log.Debug(fmt.Sprintf("Checking for any process is connecting to any interesting IPs under %d proc dirs", len(procDirs)))
+	log.Debug(
+		fmt.Sprintf(
+			"Checking for any process is connecting to any interesting IPs under %d proc dirs",
+			len(procDirs),
+		),
+	)
 	for _, netFile := range procDirs {
-		log.Debug("   looking into process dir", netFile)
+		log.Debug("   looking into process network dir", netFile)
 		dirChunks := strings.Split(netFile, "/")
 		procDirName := dirChunks[len(dirChunks)-3]
 		if procDirName == "self" || procDirName == "thread-self" {
@@ -119,6 +134,17 @@ func findUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 			Pid:      pid,
 			Protocol: protocol,
 		}
+		netNamespace, _ := process.getNetNamespace()
+		if err != nil {
+			log.Debug("skipping process ", process, " due to error reading it's net namespace: ", err)
+			continue
+		}
+
+		// this skips any other process from a net ns that we have already checked
+		if ok := knownNamespaces[netNamespace]; ok {
+			continue
+		}
+		knownNamespaces[netNamespace] = true
 		interestingServices, err := process.getInterestingServices(ipToService)
 		if err != nil {
 			log.Debug("Unable to read process network file ", netFile, " error:", err)
