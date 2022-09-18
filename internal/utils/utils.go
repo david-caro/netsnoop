@@ -151,7 +151,7 @@ func findUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 			continue
 		}
 		if len(*interestingServices) != 0 {
-			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName))
+			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName, "ns/net"))
 			if !strings.HasPrefix(userName, usersPrefix) {
 				log.Debug("        skipping non interesting user ", userName)
 				continue
