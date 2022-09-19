@@ -20,7 +20,10 @@ import (
 
 type Void struct{}
 
-var member Void
+type ServiceCounts map[string]int
+
+type UserCounts map[string]*ServiceCounts
+
 var OtherUser = "other"
 
 // ProcRoot should point to the root of the proc file system
@@ -37,24 +40,13 @@ var (
 	UDP6 = "net/udp6"
 )
 
-type Process struct {
+type ProcessDir struct {
 	Protocol string
 	Pid      int
 }
 
-// reads the specific network namespace process file
-func (p *Process) getNetNamespace() (string, error) {
-	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), "ns/net")
-	log.Debug("        reading proc namespace net file ", path)
-	dest, err := os.Readlink(path)
-	if !strings.HasPrefix(dest, "net:[") {
-		return "", fmt.Errorf("not a network namespace, but %v", dest)
-	}
-	return dest[len("net:[")-1 : len(dest)-1], err
-}
-
 // reads the specific process file
-func (p *Process) readProcNetFile() ([][]string, error) {
+func (p *ProcessDir) readProcNetFile() ([][]string, error) {
 	var lines [][]string
 	var err error
 
@@ -64,17 +56,85 @@ func (p *Process) readProcNetFile() ([][]string, error) {
 	return lines, err
 }
 
-func (p *Process) getInterestingServices(ipToService *map[string]string) (*map[string]Void, error) {
+func (p *ProcessDir) getInterestingServices(ipToService *map[string]string, userPrefix string) (*UserCounts, error) {
 	lines, err := p.readProcNetFile()
 	if err != nil {
 		return nil, err
 	}
+
+	userCounts := make(UserCounts)
 	interestingServices := findInterestingIPs(lines, ipToService, p.Protocol, p.Pid)
-	return interestingServices, nil
+	if len(*interestingServices) == 0 {
+		log.Debug("    no services found")
+		return &userCounts, nil
+	}
+	log.Debug("    got interesting services: ", interestingServices)
+	interestingUsers, err := findInterestingUsers(lines, userPrefix, p.Protocol, p.Pid)
+	log.Debug("    got interesting users: ", interestingUsers, " len:", len(interestingUsers))
+	if err != nil {
+		return nil, err
+	}
+	for _, user := range interestingUsers {
+		userCounts[user] = interestingServices
+	}
+	log.Debug("    got usercounts: ", userCounts)
+	return &userCounts, nil
 }
 
-func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol string, pid int) *map[string]Void {
-	interestingServices := make(map[string]Void)
+// for some reason, when using containers we have to pull users from two places, from the /proc/<pid>/net/* files and
+// the ownership of the /proc/<pid>
+func findInterestingUsers(lines [][]string, userPrefix string, protocol string, pid int) ([]string, error) {
+	interestingUsers := make(map[string]bool)
+	for _, line := range lines {
+		if len(line) < 8 {
+			return nil, fmt.Errorf("wrong net proc file format, it does not have 8")
+		}
+		userID := line[8]
+
+		_, ok := interestingUsers[userID]
+		if ok {
+			log.Debug("               skipping known user id ", userID)
+			continue
+		}
+		log.Debug("    found interesting user ", userID)
+
+		interestingUsers[userID] = true
+	}
+
+	procFilePath := filepath.Join(ProcRoot, strconv.Itoa(pid))
+	fileInfo, err := os.Stat(procFilePath)
+	if err != nil {
+		log.Debug("     unable to find owner of ", procFilePath)
+	} else {
+		log.Debug("     getting owner of ", procFilePath)
+		fileSys := fileInfo.Sys()
+		userID := strconv.Itoa(int(fileSys.(*syscall.Stat_t).Uid))
+		log.Debug("         got ", userID)
+		_, ok := interestingUsers[userID]
+		if ok {
+			log.Debug("               skipping known user id ", userID)
+		} else {
+			log.Debug("    found interesting user ", userID)
+			interestingUsers[userID] = true
+		}
+	}
+
+	var foundUsers []string
+	for userID := range interestingUsers {
+		user, err := user.LookupId(userID)
+		if err != nil {
+			log.Warn("Unable to resolve user with id ", userID, ", err:", err)
+			continue
+		}
+		if strings.HasPrefix(user.Username, userPrefix) {
+			foundUsers = append(foundUsers, user.Username)
+		}
+	}
+	return foundUsers, nil
+}
+
+func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol string, pid int) *ServiceCounts {
+	interestingServices := make(ServiceCounts)
 	for _, line := range lines {
 		remoteIPPort := strings.Split(line[2], ":")
 		remoteIP := parseIP(remoteIPPort[0])
@@ -83,36 +143,23 @@ func findInterestingIPs(lines [][]string, ipToService *map[string]string, protoc
 		if !ok {
 			continue
 		}
-		log.Debug("    found interesting ip ", remoteIP.String(), " part of service ", interestingService)
+		log.Debug("        found interesting ip ", remoteIP.String(), " part of service ", interestingService)
 
-		interestingServices[interestingService] = member
+		interestingServices[interestingService] = 1
 	}
 	return &interestingServices
 }
 
-func getUserFromFile(path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		log.Error(err)
-		return OtherUser
-	}
+// this finds every user that is connecting to any interesting service, filtering by the usersPrefix
+// to do so, it scans the whole /proc/*/net/* for any network namespace in which there's a connection to any
+// interesting service ip, and extracts the users that the file declares, and also from the processes in that namespace.
+// The premise here is that in toolforge, for any namespaces there's one and only one tool user in it, so any user
+// match in a namespace means that it belongs to that tool's user (that would not be true for shared namespaces).
+func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersCounts *map[string]map[string]int) error {
+	procNetGlob := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
 
-	stat := info.Sys().(*syscall.Stat_t)
-	user, err := user.LookupId(strconv.Itoa(int(stat.Uid)))
-	if err != nil {
-		log.Error(err)
-		return OtherUser
-	}
-	log.Debug("Got user ", user.Name, " from file ", path)
-	return user.Name
-}
-
-func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersToServices *map[string]map[string]int) error {
-	knownNamespaces := make(map[string]bool, 25)
-	globStr := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
-
-	log.Debug("Searching for proc dirs matching ", globStr)
-	procDirs, err := filepath.Glob(globStr)
+	log.Debug("Searching for proc dirs matching ", procNetGlob)
+	procDirs, err := filepath.Glob(procNetGlob)
 	if err != nil {
 		return err
 	}
@@ -127,57 +174,46 @@ func findUsersUsingInterestingServices(ipToService *map[string]string, usersPref
 		dirChunks := strings.Split(netFile, "/")
 		procDirName := dirChunks[len(dirChunks)-3]
 		if procDirName == "self" || procDirName == "thread-self" {
+			log.Debug("    skipping, got procDirName=", procDirName)
 			continue
 		}
 		pid, err := strconv.Atoi(procDirName)
 		if err != nil {
+			log.Debug("    got error when extracting the pid:", err)
 			return err
 		}
 
-		process := Process{
+		processDir := ProcessDir{
 			Pid:      pid,
 			Protocol: protocol,
 		}
-		netNamespace, _ := process.getNetNamespace()
-		if err != nil {
-			log.Debug("skipping process ", process, " due to error reading it's net namespace: ", err)
-			continue
-		}
 
-		// this skips any other process from a net ns that we have already checked
-		if ok := knownNamespaces[netNamespace]; ok {
-			continue
-		}
-		knownNamespaces[netNamespace] = true
-		interestingServices, err := process.getInterestingServices(ipToService)
+		newUsersCounts, err := processDir.getInterestingServices(ipToService, usersPrefix)
 		if err != nil {
-			log.Debug("Unable to read process network file ", netFile, " error:", err)
+			log.Debug("    unable to read process network file ", netFile, " error:", err)
 			continue
 		}
-		if len(*interestingServices) != 0 {
-			userName := getUserFromFile(filepath.Join(ProcRoot, procDirName, "ns/net"))
-			if !strings.HasPrefix(userName, usersPrefix) {
-				log.Debug("        skipping non interesting user ", userName)
-				continue
-			}
-			log.Debug("        found services (", interestingServices, ") for user ", userName)
-			userServices, ok := (*usersToServices)[userName]
-			if !ok {
-				userServices = make(map[string]int)
-			}
-			for service := range *interestingServices {
-				if curCount, ok := userServices[service]; ok {
-					userServices[service] = curCount + 1
-				} else {
-					userServices[service] = 1
+		if len(*newUsersCounts) != 0 {
+			log.Debug("        found services (", newUsersCounts, ")")
+			for userName, newUserCounts := range *newUsersCounts {
+				curUserCounts, ok := (*usersCounts)[userName]
+				if !ok {
+					(*usersCounts)[userName] = *newUserCounts
+					continue
+				}
+				for service, toAdd := range *newUserCounts {
+					if curCount, ok := curUserCounts[service]; ok {
+						curUserCounts[service] = curCount + toAdd
+					} else {
+						curUserCounts[service] = toAdd
+					}
 				}
 			}
-			(*usersToServices)[userName] = userServices
 		} else {
 			log.Debug("        got nothing xd! from dir ", netFile)
 		}
 	}
-	if len(*usersToServices) == 0 {
+	if len(*usersCounts) == 0 {
 		log.Debug("Found no process using any interesting services!", ipToService)
 		return fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
 	}
@@ -241,7 +277,7 @@ func parseIPSegments(ip string) []uint8 {
 	return segments
 }
 
-func GetUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string, usersToServices *map[string]map[string]int) error {
+func GetUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string, usersCounts *map[string]map[string]int) error {
 	var err error
 	var protocol string
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
@@ -254,7 +290,7 @@ func GetUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipT
 		return err
 	}
 
-	err = findUsersUsingInterestingServices(ipToService, usersPrefix, protocol, usersToServices)
+	err = findUsersUsingInterestingServices(ipToService, usersPrefix, protocol, usersCounts)
 	if err != nil {
 		return err
 	}
