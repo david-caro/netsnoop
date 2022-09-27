@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"strings"
 	"time"
 
 	configMod "github.com/david-caro/netsnoop/internal/config"
@@ -35,6 +36,28 @@ func writePromFile(path *string, counter *map[string]map[string]int) error {
 	return err
 }
 
+func interestingSiteInPacket(packet gopacket.Packet, httpServices []string) (string, bool) {
+	applicationLayer := packet.ApplicationLayer()
+	if applicationLayer != nil {
+		log.Debug("Application layer/Payload found.")
+		payload := string(applicationLayer.Payload())
+		return interestingSiteInString(payload, httpServices)
+	}
+	return "", false
+}
+
+func interestingSiteInString(stringToCheck string, interestingSites []string) (string, bool) {
+	for _, interestingSite := range interestingSites {
+		if strings.Contains(stringToCheck, interestingSite) {
+			log.Debug("Found ", interestingSite, " in data:", stringToCheck)
+			return interestingSite, true
+		} else {
+			log.Debug("Nothing interesting found in:", stringToCheck)
+		}
+	}
+	return "", false
+}
+
 func main() {
 	flag.Parse()
 
@@ -49,14 +72,12 @@ func main() {
 		log.Error(err)
 		return
 	}
-
-	bpfFilter := configMod.ConfigToBPFFilter(config)
-	ipToService := configMod.GetIPToService(config)
+	log.Debug("Got config: ", config)
 
 	// Opening Device
-	// for now capturing size 0, not interested in the contents
+	// for now capturing size 1024, only interested in the http headers if any
 	// not interested in promiscuous listening either, only packets from this host
-	handle, err := pcap.OpenLive(*iface, int32(0), false, pcap.BlockForever)
+	handle, err := pcap.OpenLive(*iface, int32(1024), false, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -84,6 +105,7 @@ func main() {
 
 	defer ticker.Stop()
 
+	bpfFilter := configMod.ConfigToBPFFilter(config)
 	err = handle.SetBPFFilter(bpfFilter)
 	if err != nil {
 		log.Fatalf("error applying BPF Filter ", bpfFilter, "  error:", err)
@@ -94,45 +116,90 @@ func main() {
 
 	usersToServicesCount := make(map[string]map[string]int)
 
+	ipToService := configMod.GetIPToService(config)
+	httpServices := make([]string, 0, len(config.InterestingHTTPServices))
+	for key := range config.InterestingHTTPServices {
+		httpServices = append(httpServices, key)
+	}
+
 	last_stat_time := time.Now()
 	// we use the network traffic only to trigger a full scan, as what we are looking for is containers we can't really match per port
 	packetChannel := packetSource.Packets()
 	for {
 		select {
 		case packet := <-packetChannel:
-			var foundService string
+			var foundIPService string
 			var foundDstIP, foundSrcIP bool
-			if ip4layer := packet.Layer(layers.LayerTypeIPv4); ip4layer != nil {
-				layerData, _ := ip4layer.(*layers.IPv4)
+			if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
+				layerData, _ := ip4Layer.(*layers.IPv4)
 				log.Debug("Got packet ", packet)
-				foundService, foundDstIP = ipToService[layerData.DstIP.String()]
-				if !foundDstIP {
-					foundService, foundSrcIP = ipToService[layerData.SrcIP.String()]
-				}
-				if foundDstIP || foundSrcIP {
-					log.Debug("Detected contact with service ", foundService)
-					log.Debug("Triggering a full re-scan")
-					err := utils.GetUsersAndInterestingServices(packet, true, &ipToService, config.InterestingUsersPrefix, &usersToServicesCount)
-					if err != nil {
-						log.Warn("    unable to get process for packet: ", err)
-						otherUserServices, ok := usersToServicesCount[utils.OtherUser]
-						if !ok {
-							otherUserServices = make(map[string]int)
-						}
-						serviceCount, ok := otherUserServices[foundService]
-						if ok {
-							otherUserServices[foundService] = serviceCount + 1
-						} else {
-							otherUserServices[foundService] = 1
-						}
-						usersToServicesCount[utils.OtherUser] = otherUserServices
-					}
-					for userName, services := range usersToServicesCount {
-						log.Debug("  User:", userName, " services:", services)
-					}
+
+				tcpLayer := packet.Layer(layers.LayerTypeTCP)
+				if tcpLayer == nil {
+					log.Debug("Skipping packet, not tcp")
 					continue
 				}
-				log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
+				tcpLayerData, _ := tcpLayer.(*layers.TCP)
+
+				foundHttpService, wasFound := interestingSiteInPacket(packet, httpServices)
+				if wasFound {
+					log.Info("Detected HTTP based site '", foundHttpService, "'")
+				} else {
+					log.Debug("Detected IP based site")
+				}
+
+				log.Debug("Extracting interesting IPs/port")
+				interestingIP := layerData.DstIP.String()
+				var localPort int
+				foundIPService, foundDstIP = ipToService[interestingIP]
+				// the local port is the opposite (src<->dst) than the interesting ip
+				localPort = int(tcpLayerData.SrcPort)
+				if !foundDstIP {
+					interestingIP = layerData.SrcIP.String()
+					foundIPService, foundSrcIP = ipToService[interestingIP]
+					localPort = int(tcpLayerData.DstPort)
+				}
+				if !foundDstIP && !foundSrcIP {
+					log.Debug("Skipping packet, no interesting ips found in it.")
+					continue
+				}
+
+				var foundService string
+				if wasFound {
+					foundService = foundHttpService
+				} else {
+					foundService = foundIPService
+				}
+
+				log.Debug("Found interesting ip ", interestingIP, ", connected to local port ", localPort)
+
+				err := utils.GetUsersAndInterestingServicesNatted(
+					packet,
+					interestingIP,
+					localPort,
+					foundService,
+					config.InterestingUsersPrefix,
+					&usersToServicesCount,
+				)
+				if err != nil {
+					log.Warn("    unable to get process for packet: ", err)
+					otherUserServices, ok := usersToServicesCount[utils.OtherUser]
+					if !ok {
+						otherUserServices = make(map[string]int)
+					}
+					serviceCount, ok := otherUserServices[foundIPService]
+					if ok {
+						otherUserServices[foundIPService] = serviceCount + 1
+					} else {
+						otherUserServices[foundIPService] = 1
+					}
+					usersToServicesCount[utils.OtherUser] = otherUserServices
+				}
+				for userName, services := range usersToServicesCount {
+					log.Debug("  User:", userName, " services:", services)
+				}
+				continue
+				//log.Warn("Detected unknown ip ", packet.NetworkLayer().NetworkFlow().Dst().String())
 			}
 		default:
 			if time.Since(last_stat_time) > time.Duration(*refreshSecs)*time.Second {

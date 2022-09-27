@@ -7,13 +7,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Service struct {
+type IPService struct {
+	IPs []string `yaml:"ips"`
+}
+
+type HTTPService struct {
 	IPs []string `yaml:"ips"`
 }
 
 type Config struct {
-	InterestingServices    map[string]Service `yaml:"interesting_services"`
-	InterestingUsersPrefix string             `yaml:"interesting_users_prefix"`
+	InterestingIPServices   map[string]IPService   `yaml:"ip_services"`
+	InterestingHTTPServices map[string]HTTPService `yaml:"http_services"`
+	InterestingUsersPrefix  string                 `yaml:"interesting_users_prefix"`
 }
 
 func ReadConfig(configPath string) (Config, error) {
@@ -36,7 +41,12 @@ func ReadConfig(configPath string) (Config, error) {
 
 func GetIPToService(config Config) map[string]string {
 	ipToService := make(map[string]string)
-	for serviceName, service := range config.InterestingServices {
+	for serviceName, service := range config.InterestingIPServices {
+		for _, ip := range service.IPs {
+			ipToService[ip] = serviceName
+		}
+	}
+	for serviceName, service := range config.InterestingHTTPServices {
 		for _, ip := range service.IPs {
 			ipToService[ip] = serviceName
 		}
@@ -45,9 +55,20 @@ func GetIPToService(config Config) map[string]string {
 }
 
 func ConfigToBPFFilter(config Config) string {
-	bpfFilter := "((tcp and tcp[tcpflags] & tcp-syn != 0) or udp) and ("
+	//bpfFilter := "((tcp and tcp[tcpflags] & tcp-syn != 0) or udp) and ("
+	bpfFilter := "(tcp or udp) and ("
 	firstFilter := true
-	for _, service := range config.InterestingServices {
+	for _, service := range config.InterestingIPServices {
+		for _, ip := range service.IPs {
+			if firstFilter {
+				bpfFilter += "dst host " + ip
+				firstFilter = false
+			} else {
+				bpfFilter += " or dst host " + ip
+			}
+		}
+	}
+	for _, service := range config.InterestingHTTPServices {
 		for _, ip := range service.IPs {
 			if firstFilter {
 				bpfFilter += "dst host " + ip

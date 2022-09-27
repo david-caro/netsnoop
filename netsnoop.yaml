@@ -1,4 +1,7 @@
-interesting_services:
+http_services:
+  "commons.wikimedia.org":
+    ips:
+      - 195.201.53.168
   "wikimedia.es":
     ips:
       - 195.201.53.168
@@ -8,8 +11,10 @@ interesting_services:
   "meta.wikimedia.org":
     ips:
       - 208.80.154.224
+
+ip_services:
   "login.toolforge.org":
     ips:
       - 185.15.56.66
 
-interesting_users_prefix: tools.
+interesting_users_prefix: ""

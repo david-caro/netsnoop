@@ -52,56 +52,14 @@ func (p *ProcessDir) readProcNetFile() ([][]string, error) {
 
 	path := filepath.Join(ProcRoot, strconv.Itoa(p.Pid), p.Protocol)
 	log.Debug("        reading proc net file ", path)
-	lines, err = readProcNetFile(path)
+	lines, err = readProcFile(path)
 	return lines, err
 }
 
-func (p *ProcessDir) getInterestingServices(ipToService *map[string]string, userPrefix string) (*UserCounts, error) {
-	lines, err := p.readProcNetFile()
-	if err != nil {
-		return nil, err
-	}
-
-	userCounts := make(UserCounts)
-	interestingServices := findInterestingIPs(lines, ipToService, p.Protocol, p.Pid)
-	if len(*interestingServices) == 0 {
-		log.Debug("    no services found")
-		return &userCounts, nil
-	}
-	log.Debug("    got interesting services: ", interestingServices)
-	interestingUsers, err := findInterestingUsers(lines, userPrefix, p.Protocol, p.Pid)
-	log.Debug("    got interesting users: ", interestingUsers, " len:", len(interestingUsers))
-	if err != nil {
-		return nil, err
-	}
-	for _, user := range interestingUsers {
-		userCounts[user] = interestingServices
-	}
-	log.Debug("    got usercounts: ", userCounts)
-	return &userCounts, nil
-}
-
-// for some reason, when using containers we have to pull users from two places, from the /proc/<pid>/net/* files and
-// the ownership of the /proc/<pid>
-func findInterestingUsers(lines [][]string, userPrefix string, protocol string, pid int) ([]string, error) {
+// Poor man's function to get the user owning a process, uses the permissions of the /proc dirs
+func (p *ProcessDir) getUser(userPrefix string) ([]string, error) {
 	interestingUsers := make(map[string]bool)
-	for _, line := range lines {
-		if len(line) < 8 {
-			return nil, fmt.Errorf("wrong net proc file format, it does not have 8")
-		}
-		userID := line[8]
-
-		_, ok := interestingUsers[userID]
-		if ok {
-			log.Debug("               skipping known user id ", userID)
-			continue
-		}
-		log.Debug("    found interesting user ", userID)
-
-		interestingUsers[userID] = true
-	}
-
-	procFilePath := filepath.Join(ProcRoot, strconv.Itoa(pid))
+	procFilePath := filepath.Join(ProcRoot, strconv.Itoa(p.Pid))
 	fileInfo, err := os.Stat(procFilePath)
 	if err != nil {
 		log.Debug("     unable to find owner of ", procFilePath)
@@ -120,107 +78,58 @@ func findInterestingUsers(lines [][]string, userPrefix string, protocol string, 
 	}
 
 	var foundUsers []string
-	for userID := range interestingUsers {
+	for user := range interestingUsers {
+		foundUsers = append(foundUsers, user)
+	}
+	return foundUsers, nil
+}
+
+func (p *ProcessDir) getUsersUsingIp(ip string, userPrefix string) ([]string, error) {
+	lines, err := p.readProcNetFile()
+	if err != nil {
+		log.Debug("Got error reading procnetfile", err)
+		return nil, err
+	}
+
+	usersSet := make(map[string]bool)
+
+	for _, line := range lines {
+		if len(line) < 8 {
+			return nil, fmt.Errorf("wrong net proc file format, it does not have 8")
+		}
+		localIPPort := strings.Split(line[1], ":")
+		localIP := parseIP(localIPPort[0])
+		if localIP.String() != ip {
+			continue
+		}
+		log.Debug("Got matching ip (", localIP.String(), "==", ip)
+		procUsers, err := p.getUser(userPrefix)
+		if err != nil {
+			log.Debug("Unable to retrieve users for process ", p, " got error:", err)
+			return nil, err
+		}
+		for _, userID := range procUsers {
+			usersSet[userID] = true
+		}
+	}
+
+	users := make([]string, 0)
+	for userID := range usersSet {
 		user, err := user.LookupId(userID)
 		if err != nil {
 			log.Warn("Unable to resolve user with id ", userID, ", err:", err)
 			continue
 		}
 		if strings.HasPrefix(user.Username, userPrefix) {
-			foundUsers = append(foundUsers, user.Username)
-		}
-	}
-	return foundUsers, nil
-}
-
-func findInterestingIPs(lines [][]string, ipToService *map[string]string, protocol string, pid int) *ServiceCounts {
-	interestingServices := make(ServiceCounts)
-	for _, line := range lines {
-		remoteIPPort := strings.Split(line[2], ":")
-		remoteIP := parseIP(remoteIPPort[0])
-
-		interestingService, ok := (*ipToService)[remoteIP.String()]
-		if !ok {
-			continue
-		}
-		log.Debug("        found interesting ip ", remoteIP.String(), " part of service ", interestingService)
-
-		interestingServices[interestingService] = 1
-	}
-	return &interestingServices
-}
-
-// this finds every user that is connecting to any interesting service, filtering by the usersPrefix
-// to do so, it scans the whole /proc/*/net/* for any network namespace in which there's a connection to any
-// interesting service ip, and extracts the users that the file declares, and also from the processes in that namespace.
-// The premise here is that in toolforge, for any namespaces there's one and only one tool user in it, so any user
-// match in a namespace means that it belongs to that tool's user (that would not be true for shared namespaces).
-func findUsersUsingInterestingServices(ipToService *map[string]string, usersPrefix string, protocol string, usersCounts *map[string]map[string]int) error {
-	procNetGlob := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
-
-	log.Debug("Searching for proc dirs matching ", procNetGlob)
-	procDirs, err := filepath.Glob(procNetGlob)
-	if err != nil {
-		return err
-	}
-	log.Debug(
-		fmt.Sprintf(
-			"Checking for any process is connecting to any interesting IPs under %d proc dirs",
-			len(procDirs),
-		),
-	)
-	for _, netFile := range procDirs {
-		log.Debug("   looking into process network dir", netFile)
-		dirChunks := strings.Split(netFile, "/")
-		procDirName := dirChunks[len(dirChunks)-3]
-		if procDirName == "self" || procDirName == "thread-self" {
-			log.Debug("    skipping, got procDirName=", procDirName)
-			continue
-		}
-		pid, err := strconv.Atoi(procDirName)
-		if err != nil {
-			log.Debug("    got error when extracting the pid:", err)
-			return err
-		}
-
-		processDir := ProcessDir{
-			Pid:      pid,
-			Protocol: protocol,
-		}
-
-		newUsersCounts, err := processDir.getInterestingServices(ipToService, usersPrefix)
-		if err != nil {
-			log.Debug("    unable to read process network file ", netFile, " error:", err)
-			continue
-		}
-		if len(*newUsersCounts) != 0 {
-			log.Debug("        found services (", newUsersCounts, ")")
-			for userName, newUserCounts := range *newUsersCounts {
-				curUserCounts, ok := (*usersCounts)[userName]
-				if !ok {
-					(*usersCounts)[userName] = *newUserCounts
-					continue
-				}
-				for service, toAdd := range *newUserCounts {
-					if curCount, ok := curUserCounts[service]; ok {
-						curUserCounts[service] = curCount + toAdd
-					} else {
-						curUserCounts[service] = toAdd
-					}
-				}
-			}
+			users = append(users, user.Username)
 		} else {
-			log.Debug("        got nothing xd! from dir ", netFile)
+			log.Debug("skipping user ", user.Username, " as does not match prefix '", userPrefix, "'")
 		}
 	}
-	if len(*usersCounts) == 0 {
-		log.Debug("Found no process using any interesting services!", ipToService)
-		return fmt.Errorf("unable to find any processes using interesting ips %v", ipToService)
-	}
-	return nil
+	return users, nil
 }
 
-func readProcNetFile(procFilePath string) ([][]string, error) {
+func readProcFile(procFilePath string) ([][]string, error) {
 	var lines [][]string
 
 	f, err := os.Open(procFilePath)
@@ -277,23 +186,138 @@ func parseIPSegments(ip string) []uint8 {
 	return segments
 }
 
-func GetUsersAndInterestingServices(packet gopacket.Packet, localIsSrc bool, ipToService *map[string]string, usersPrefix string, usersCounts *map[string]map[string]int) error {
-	var err error
+// scans the whole /proc for any process that has the given ip in it's network namespace, and returns the interesting
+// users in that namespace matching the given prefix
+func getUsersForIP(ip string, usersPrefix string, protocol string) ([]string, error) {
+	procNetGlob := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
+
+	log.Debug("Searching for proc dirs matching ", procNetGlob)
+	procDirs, err := filepath.Glob(procNetGlob)
+	if err != nil {
+		return nil, err
+	}
+
+	usersSet := make(map[string]bool)
+	log.Debug("Checking for any process connecting from ip ", ip)
+	for _, netFile := range procDirs {
+		log.Debug("   looking into process network dir", netFile, " for ip ", ip)
+		dirChunks := strings.Split(netFile, "/")
+		procDirName := dirChunks[len(dirChunks)-3]
+		if procDirName == "self" || procDirName == "thread-self" {
+			log.Debug("    skipping, got procDirName=", procDirName)
+			continue
+		}
+		pid, err := strconv.Atoi(procDirName)
+		if err != nil {
+			log.Debug("    got error when extracting the pid:", err)
+			return nil, err
+		}
+
+		processDir := ProcessDir{
+			Pid:      pid,
+			Protocol: protocol,
+		}
+
+		newUsers, err := processDir.getUsersUsingIp(ip, usersPrefix)
+		if err != nil {
+			log.Debug("    unable to read process network file ", netFile, " error:", err)
+			continue
+		}
+		if len(newUsers) != 0 {
+			log.Debug("        found users (", newUsers, ")")
+			for _, user := range newUsers {
+				usersSet[user] = true
+			}
+		} else {
+			log.Debug("        got nothing xd! from dir ", netFile)
+		}
+	}
+
+	users := make([]string, 0, len(usersSet))
+	for user := range usersSet {
+		users = append(users, user)
+	}
+	if len(users) == 0 {
+		log.Debug("Found no process using the ip ", ip)
+		return nil, fmt.Errorf("unable to find any processes using ip %v", ip)
+	}
+	return users, nil
+}
+
+// We parse the nf_conntrack file trying to find a line where the first sport is the port we want, and the last dst the
+// ip of the service we want.
+// An example for port 57090 and ip 172.16.0.119:
+//   ipv4     2 tcp      6 91 TIME_WAIT src=192.168.231.167 dst=213.186.33.5 sport=57090 dport=80 src=213.186.33.5 dst=172.16.0.119 sport=80 dport=37966 [ASSURED] mark=0 zone=0 use=2
+// or
+// ipv4 2 tcp 6 119 TIME_WAIT src=192.168.231.167 dst=208.80.154.224 sport=34010 dport=80 src=208.80.154.224 dst=172.16.0.119 sport=80 dport=5439 [ASSURED] mark=0 zone=0 use=2
+func findUsersUsingInterestingServicesByLocalPort(
+	dstIp string,
+	localPort int,
+	foundService string,
+	usersPrefix string,
+	protocol string,
+	usersCounts *map[string]map[string]int,
+) error {
+	log.Debug("Starting findUsersUsingInterestingServicesByLocalPort")
+	nfConntrackFile := fmt.Sprintf("%s/self/net/nf_conntrack", ProcRoot)
+	nfConntrackLines, err := readProcFile(nfConntrackFile)
+	if err != nil {
+		log.Debug("Got error when checking file ", nfConntrackFile, err)
+		return err
+	}
+
+	log.Debug("Got lines ", nfConntrackLines)
+	for _, lineChunks := range nfConntrackLines {
+		if len(lineChunks) < 14 {
+			log.Debug("Skipping conntrack line, too short (probably listening connection): ", lineChunks)
+			continue
+		}
+		if (lineChunks[8] == fmt.Sprintf("sport=%d", localPort) && lineChunks[11] == fmt.Sprintf("dst=%s", dstIp)) ||
+			(lineChunks[13] == fmt.Sprintf("dport=%d", localPort) && lineChunks[10] == fmt.Sprintf("src=%s", dstIp)) {
+			log.Debug("Found a match in the nf_conntrack file!", lineChunks)
+			nattedIp := strings.Split(lineChunks[6], "=")[1]
+			users, error := getUsersForIP(nattedIp, usersPrefix, protocol)
+			if error != nil {
+				return error
+			}
+			for _, username := range users {
+				if !strings.HasPrefix(username, usersPrefix) {
+					continue
+				}
+
+				userCounts, ok := (*usersCounts)[username]
+				if !ok {
+					userCounts = make(map[string]int)
+				}
+				curCount, ok := userCounts[foundService]
+				if ok {
+					userCounts[foundService] = curCount + 1
+				} else {
+					userCounts[foundService] = 1
+				}
+				(*usersCounts)[username] = userCounts
+			}
+		}
+	}
+	return nil
+}
+
+// This pin-points the connection using the nf_conntrack data (NATed connections)
+func GetUsersAndInterestingServicesNatted(
+	packet gopacket.Packet,
+	ip string,
+	localPort int,
+	foundService string,
+	usersPrefix string,
+	usersCounts *map[string]map[string]int,
+) error {
+	log.Debug("Starting GetUsersAndInterestingServicesNatted")
 	var protocol string
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		protocol = TCP
-
 	} else if tcpLayer := packet.Layer(layers.LayerTypeUDP); tcpLayer != nil {
 		protocol = UDP
 	}
-	if err != nil {
-		return err
-	}
 
-	err = findUsersUsingInterestingServices(ipToService, usersPrefix, protocol, usersCounts)
-	if err != nil {
-		return err
-	}
-
-	return err
+	return findUsersUsingInterestingServicesByLocalPort(ip, localPort, foundService, usersPrefix, protocol, usersCounts)
 }
