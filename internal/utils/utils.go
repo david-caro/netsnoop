@@ -24,8 +24,6 @@ type ServiceCounts map[string]int
 
 type UserCounts map[string]*ServiceCounts
 
-var OtherUser = "other"
-
 // ProcRoot should point to the root of the proc file system
 var ProcRoot = "/proc"
 
@@ -250,7 +248,7 @@ func getUsersForIP(ip string, usersPrefix string, protocol string) ([]string, er
 //   ipv4     2 tcp      6 91 TIME_WAIT src=192.168.231.167 dst=213.186.33.5 sport=57090 dport=80 src=213.186.33.5 dst=172.16.0.119 sport=80 dport=37966 [ASSURED] mark=0 zone=0 use=2
 // or
 // ipv4 2 tcp 6 119 TIME_WAIT src=192.168.231.167 dst=208.80.154.224 sport=34010 dport=80 src=208.80.154.224 dst=172.16.0.119 sport=80 dport=5439 [ASSURED] mark=0 zone=0 use=2
-func findUsersUsingInterestingServicesByLocalPort(
+func findUsersForLocalPort(
 	dstIp string,
 	localPort int,
 	foundService string,
@@ -292,6 +290,10 @@ func findUsersUsingInterestingServicesByLocalPort(
 				curCount, ok := userCounts[foundService]
 				if ok {
 					userCounts[foundService] = curCount + 1
+					// loop around the int counter if hit max int value (that is, it becomes -1)
+					if userCounts[foundService] <= 0 {
+						userCounts[foundService] = 1
+					}
 				} else {
 					userCounts[foundService] = 1
 				}
@@ -303,7 +305,7 @@ func findUsersUsingInterestingServicesByLocalPort(
 }
 
 // This pin-points the connection using the nf_conntrack data (NATed connections)
-func GetUsersAndInterestingServicesNatted(
+func FindUsersForLocalPort(
 	packet gopacket.Packet,
 	ip string,
 	localPort int,
@@ -311,7 +313,6 @@ func GetUsersAndInterestingServicesNatted(
 	usersPrefix string,
 	usersCounts *map[string]map[string]int,
 ) error {
-	log.Debug("Starting GetUsersAndInterestingServicesNatted")
 	var protocol string
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		protocol = TCP
@@ -319,5 +320,5 @@ func GetUsersAndInterestingServicesNatted(
 		protocol = UDP
 	}
 
-	return findUsersUsingInterestingServicesByLocalPort(ip, localPort, foundService, usersPrefix, protocol, usersCounts)
+	return findUsersForLocalPort(ip, localPort, foundService, usersPrefix, protocol, usersCounts)
 }

@@ -1,20 +1,11 @@
-http_services:
-  "commons.wikimedia.org":
-    ips:
-      - 195.201.53.168
-  "wikimedia.es":
-    ips:
-      - 195.201.53.168
-  "wikimedia.it":
-    ips:
-      - 51.75.90.142
-  "meta.wikimedia.org":
-    ips:
-      - 208.80.154.224
+http_service_regexes:
+  - "([a-z]+.)?wikipedia.org"
+  - "([a-z]+.)?wikimedia.org"
+  - "([a-z]+.)?mediawiki.org"
 
-ip_services:
-  "login.toolforge.org":
-    ips:
-      - 185.15.56.66
+# TODO: resolve these IPs on startup
+ips_to_listen_to:
+  - 208.80.154.224 # meta.wikimedia.org
+  - 185.15.58.224 # dyna.wikimedia.org -> *.wikipedia.org, commons.wikimedia.org, ...
 
-interesting_users_prefix: ""
+interesting_users_prefix: "tools."

@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"strings"
+	"regexp"
 	"time"
 
 	configMod "github.com/david-caro/netsnoop/internal/config"
@@ -36,23 +36,24 @@ func writePromFile(path *string, counter *map[string]map[string]int) error {
 	return err
 }
 
-func interestingSiteInPacket(packet gopacket.Packet, httpServices []string) (string, bool) {
+func findSiteInPacket(packet gopacket.Packet, httpServicesRegexes []*regexp.Regexp) (string, bool) {
 	applicationLayer := packet.ApplicationLayer()
 	if applicationLayer != nil {
 		log.Debug("Application layer/Payload found.")
 		payload := string(applicationLayer.Payload())
-		return interestingSiteInString(payload, httpServices)
+		return findSiteInString(payload, httpServicesRegexes)
 	}
 	return "", false
 }
 
-func interestingSiteInString(stringToCheck string, interestingSites []string) (string, bool) {
-	for _, interestingSite := range interestingSites {
-		if strings.Contains(stringToCheck, interestingSite) {
-			log.Debug("Found ", interestingSite, " in data:", stringToCheck)
-			return interestingSite, true
+func findSiteInString(stringToCheck string, siteRegexes []*regexp.Regexp) (string, bool) {
+	for _, siteRegex := range siteRegexes {
+		match := siteRegex.FindString(stringToCheck)
+		if match != "" {
+			log.Debug("Found ", match, " in data:", stringToCheck)
+			return match, true
 		} else {
-			log.Debug("Nothing interesting found in:", stringToCheck)
+			log.Debug("Nothing interesting found in:", stringToCheck, " with regex:", siteRegex)
 		}
 	}
 	return "", false
@@ -75,9 +76,9 @@ func main() {
 	log.Debug("Got config: ", config)
 
 	// Opening Device
-	// for now capturing size 1024, only interested in the http headers if any
+	// for now capturing size 512, only interested in the http headers if any
 	// not interested in promiscuous listening either, only packets from this host
-	handle, err := pcap.OpenLive(*iface, int32(1024), false, pcap.BlockForever)
+	handle, err := pcap.OpenLive(*iface, int32(512), false, pcap.BlockForever)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -116,10 +117,14 @@ func main() {
 
 	usersToServicesCount := make(map[string]map[string]int)
 
-	ipToService := configMod.GetIPToService(config)
-	httpServices := make([]string, 0, len(config.InterestingHTTPServices))
-	for key := range config.InterestingHTTPServices {
-		httpServices = append(httpServices, key)
+	httpServicesRegexes := make([]*regexp.Regexp, 0, len(config.HttpServiceRegexes))
+	for _, serviceRegex := range config.HttpServiceRegexes {
+		regex, err := regexp.Compile(serviceRegex)
+		if err != nil {
+			log.Error("Unable to parse service regex: ", serviceRegex, " error:", err)
+			continue
+		}
+		httpServicesRegexes = append(httpServicesRegexes, regex)
 	}
 
 	last_stat_time := time.Now()
@@ -128,8 +133,6 @@ func main() {
 	for {
 		select {
 		case packet := <-packetChannel:
-			var foundIPService string
-			var foundDstIP, foundSrcIP bool
 			if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
 				layerData, _ := ip4Layer.(*layers.IPv4)
 				log.Debug("Got packet ", packet)
@@ -141,39 +144,21 @@ func main() {
 				}
 				tcpLayerData, _ := tcpLayer.(*layers.TCP)
 
-				foundHttpService, wasFound := interestingSiteInPacket(packet, httpServices)
+				foundService, wasFound := findSiteInPacket(packet, httpServicesRegexes)
 				if wasFound {
-					log.Info("Detected HTTP based site '", foundHttpService, "'")
+					log.Debug("Detected HTTP based site '", foundService, "'")
 				} else {
-					log.Debug("Detected IP based site")
+					log.Debug("No site found, skipping packet")
+					continue
 				}
 
 				log.Debug("Extracting interesting IPs/port")
 				interestingIP := layerData.DstIP.String()
-				var localPort int
-				foundIPService, foundDstIP = ipToService[interestingIP]
 				// the local port is the opposite (src<->dst) than the interesting ip
-				localPort = int(tcpLayerData.SrcPort)
-				if !foundDstIP {
-					interestingIP = layerData.SrcIP.String()
-					foundIPService, foundSrcIP = ipToService[interestingIP]
-					localPort = int(tcpLayerData.DstPort)
-				}
-				if !foundDstIP && !foundSrcIP {
-					log.Debug("Skipping packet, no interesting ips found in it.")
-					continue
-				}
+				localPort := int(tcpLayerData.SrcPort)
+				log.Debug("Found interesting ip ", interestingIP, ", connected to local port ", localPort, " for service ", foundService)
 
-				var foundService string
-				if wasFound {
-					foundService = foundHttpService
-				} else {
-					foundService = foundIPService
-				}
-
-				log.Debug("Found interesting ip ", interestingIP, ", connected to local port ", localPort)
-
-				err := utils.GetUsersAndInterestingServicesNatted(
+				err := utils.FindUsersForLocalPort(
 					packet,
 					interestingIP,
 					localPort,
@@ -183,17 +168,6 @@ func main() {
 				)
 				if err != nil {
 					log.Warn("    unable to get process for packet: ", err)
-					otherUserServices, ok := usersToServicesCount[utils.OtherUser]
-					if !ok {
-						otherUserServices = make(map[string]int)
-					}
-					serviceCount, ok := otherUserServices[foundIPService]
-					if ok {
-						otherUserServices[foundIPService] = serviceCount + 1
-					} else {
-						otherUserServices[foundIPService] = 1
-					}
-					usersToServicesCount[utils.OtherUser] = otherUserServices
 				}
 				for userName, services := range usersToServicesCount {
 					log.Debug("  User:", userName, " services:", services)
