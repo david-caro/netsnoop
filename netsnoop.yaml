@@ -2,6 +2,8 @@ http_service_regexes:
   - "([a-z]+.)?wikipedia.org"
   - "([a-z]+.)?wikimedia.org"
   - "([a-z]+.)?mediawiki.org"
+  - "([a-z]+.)?wikidata.org"
+  - "([a-z]+.)?wikisource.org"
 
 # TODO: resolve these IPs on startup
 ips_to_listen_to:
