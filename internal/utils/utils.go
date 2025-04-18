@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -184,9 +185,48 @@ func parseIPSegments(ip string) []uint8 {
 	return segments
 }
 
+type UserCacheEntry struct {
+	ExpiresAt int64
+	Users     []string
+}
+
+func (u *UserCacheEntry) IsExpired() bool {
+	if u.ExpiresAt == 0 {
+		return false
+	}
+	return u.ExpiresAt < time.Now().Unix()
+}
+
+var userCache = make(map[string]*UserCacheEntry)
+
+func GetUserFromCache(cacheKey string) ([]string, bool) {
+	if entry, ok := userCache[cacheKey]; ok {
+		if entry.IsExpired() {
+			delete(userCache, cacheKey)
+			return nil, false
+		}
+		// refresh the expiration time
+		userCache[cacheKey] = &UserCacheEntry{
+			// TODO: configure the cache expiration time
+			ExpiresAt: time.Now().Add(1 * time.Minute).Unix(),
+			Users:     entry.Users,
+		}
+		return entry.Users, true
+	}
+	return nil, false
+}
+
 // scans the whole /proc for any process that has the given ip in it's network namespace, and returns the interesting
 // users in that namespace matching the given prefix
 func getUsersForIP(ip string, usersPrefix string, protocol string) ([]string, error) {
+	// using a cache as it's quite expensive to scan the whole /proc for every user
+	// and relatively save to think that the same ip/port will be used by the same process for a while
+	cacheKey := fmt.Sprintf("%s-%s", ip, protocol)
+	if cachedUsers, ok := GetUserFromCache(cacheKey); ok {
+		log.Debug("Found user in cache for ip ", ip, " users=", cachedUsers)
+		return cachedUsers, nil
+	}
+
 	procNetGlob := fmt.Sprintf("%s/*/%s", ProcRoot, protocol)
 
 	log.Debug("Searching for proc dirs matching ", procNetGlob)
@@ -239,13 +279,20 @@ func getUsersForIP(ip string, usersPrefix string, protocol string) ([]string, er
 		log.Debug("Found no process using the ip ", ip)
 		return nil, fmt.Errorf("unable to find any processes using ip %v", ip)
 	}
+	userCache[cacheKey] = &UserCacheEntry{
+		// TODO: configure the cache expiration time
+		ExpiresAt: time.Now().Add(1 * time.Minute).Unix(),
+		Users:     users,
+	}
 	return users, nil
 }
 
 // We parse the nf_conntrack file trying to find a line where the first sport is the port we want, and the last dst the
 // ip of the service we want.
 // An example for port 57090 and ip 172.16.0.119:
-//   ipv4     2 tcp      6 91 TIME_WAIT src=192.168.231.167 dst=213.186.33.5 sport=57090 dport=80 src=213.186.33.5 dst=172.16.0.119 sport=80 dport=37966 [ASSURED] mark=0 zone=0 use=2
+//
+//	ipv4     2 tcp      6 91 TIME_WAIT src=192.168.231.167 dst=213.186.33.5 sport=57090 dport=80 src=213.186.33.5 dst=172.16.0.119 sport=80 dport=37966 [ASSURED] mark=0 zone=0 use=2
+//
 // or
 // ipv4 2 tcp 6 119 TIME_WAIT src=192.168.231.167 dst=208.80.154.224 sport=34010 dport=80 src=208.80.154.224 dst=172.16.0.119 sport=80 dport=5439 [ASSURED] mark=0 zone=0 use=2
 func findUsersForLocalPort(
