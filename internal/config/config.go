@@ -8,9 +8,10 @@ import (
 )
 
 type Config struct {
-	HttpServiceRegexes     []string `yaml:"http_service_regexes"`
-	IpsToListenTo          []string `yaml:"ips_to_listen_to"`
-	InterestingUsersPrefix string   `yaml:"interesting_users_prefix"`
+	HttpServiceRegexes     []string          `yaml:"http_service_regexes"`
+	IpsToServiceMap        map[string]string `yaml:"ips_to_service"`
+	IpsToListenTo          []string          `yaml:"ips_to_listen_to"`
+	InterestingUsersPrefix string            `yaml:"interesting_users_prefix"`
 }
 
 func ReadConfig(configPath string) (Config, error) {

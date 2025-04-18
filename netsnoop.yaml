@@ -6,8 +6,16 @@ http_service_regexes:
   - "([a-z]+.)?wikisource.org"
 
 # TODO: resolve these IPs on startup
+# TODO: this can be added automatically to the filter to listen to
+ips_to_service:
+  172.16.2.46: redis.svc.tools.eqiad1.wikimedia.cloud
+  172.16.0.24: elasticsearch.svc.tools.eqiad1.wikimedia.cloud
+  172.16.0.168: tools.db.svc.wikimedia.cloud
+
 ips_to_listen_to:
-  - 208.80.154.224 # meta.wikimedia.org
-  - 185.15.58.224 # dyna.wikimedia.org -> *.wikipedia.org, commons.wikimedia.org, ...
+  - 208.80.154.224 # meta.wikimedia.org, dyna.wikimedia.org -> *.wikipedia.org, commons.wikimedia.org, ...
+  - 172.16.2.46 # redis.svc.tools.eqiad1.wikimedia.cloud
+  - 172.16.0.24 # elasticsearch.svc.tools.eqiad1.wikimedia.cloud
+  - 172.16.0.168 # tools.db.svc.wikimedia.cloud
 
 interesting_users_prefix: "tools."

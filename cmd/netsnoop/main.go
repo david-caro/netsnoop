@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"regexp"
 	"time"
 
@@ -31,18 +31,42 @@ func writePromFile(path *string, counter *map[string]map[string]int) error {
 		}
 	}
 	// needed as we use golang 1.11.6 and os.WriteFile is not supported yet
-	err := ioutil.WriteFile(*path, []byte(promData), 0644)
+	err := os.WriteFile(*path, []byte(promData), 0644)
 	log.Debug("Wrote prometheus file ", path)
 	return err
 }
 
-func findSiteInPacket(packet gopacket.Packet, httpServicesRegexes []*regexp.Regexp) (string, bool) {
+func findSiteInPacket(packet gopacket.Packet, httpServicesRegexes []*regexp.Regexp, ipToServiceMap *map[string]string) (string, bool) {
+	log.Debug("Checking network layer")
+	packet.NetworkLayer()
+	if packet.NetworkLayer() != nil {
+		log.Debug("Network layer found.")
+		networkLayer := packet.NetworkLayer()
+		ip := networkLayer.NetworkFlow().Dst().String()
+		log.Debug("IP found: ", ip)
+		if service, ok := (*ipToServiceMap)[ip]; ok {
+			log.Debug("Found service ", service, " for ip ", ip)
+			return service, true
+		} else {
+			log.Debug("No service found for ip ", ip)
+		}
+	} else {
+		log.Debug("No network layer found.")
+	}
+
+	log.Debug("Checking application layer")
 	applicationLayer := packet.ApplicationLayer()
 	if applicationLayer != nil {
 		log.Debug("Application layer/Payload found.")
 		payload := string(applicationLayer.Payload())
-		return findSiteInString(payload, httpServicesRegexes)
+		if service, found := findSiteInString(payload, httpServicesRegexes); found {
+			log.Debug("Found site in application layer: ", service)
+			return service, true
+		} else {
+			log.Debug("No site found in application layer.")
+		}
 	}
+
 	return "", false
 }
 
@@ -144,7 +168,11 @@ func main() {
 				}
 				tcpLayerData, _ := tcpLayer.(*layers.TCP)
 
-				foundService, wasFound := findSiteInPacket(packet, httpServicesRegexes)
+				foundService, wasFound := findSiteInPacket(
+					packet,
+					httpServicesRegexes,
+					&config.IpsToServiceMap,
+				)
 				if wasFound {
 					log.Debug("Detected HTTP based site '", foundService, "'")
 				} else {
