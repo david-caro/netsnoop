@@ -23,11 +23,11 @@ var promPath = flag.String("promPath", "./netsnoop.prom", "File to output promet
 var refreshSecs = flag.Uint("refreshSecs", 60, "How often to show the stats and write down the prom file")
 
 func writePromFile(path *string, counter *map[string]map[string]int) error {
-	promData := "# HELP toolforge_internal_dependencies Number of times a tool has known to start a connection to the given known dependency\n"
-	promData += "# TYPE toolforge_internal_dependencies counter\n"
+	promData := "# HELP toolforge_internal_dependencies_total Number of times a tool has known to start a connection to the given known dependency\n"
+	promData += "# TYPE toolforge_internal_dependencies_total counter\n"
 	for toolName, sites := range *counter {
 		for site, count := range sites {
-			promData += fmt.Sprintf("toolforge_internal_dependencies{tool=\"%s\", dependency=\"%s\"} %d\n", toolName, site, count)
+			promData += fmt.Sprintf("toolforge_internal_dependencies_total{tool=\"%s\", dependency=\"%s\"} %d\n", toolName, site, count)
 		}
 	}
 	// needed as we use golang 1.11.6 and os.WriteFile is not supported yet
